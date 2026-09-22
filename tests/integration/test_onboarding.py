@@ -134,11 +134,23 @@ async def _event_status(session: AsyncSession, event_id: uuid.UUID) -> tuple[str
 
 
 @pytest.fixture
-async def tokens(session: AsyncSession) -> list[str]:
+async def demo_houses(session: AsyncSession) -> dict[str, list[str]]:
+    """Демо-дома в базе; возвращает deep-link токены по ключу дома.
+
+    Нужна и тестам поиска адреса, а не только deep-link: пока дома сеял лишь
+    сосед по очереди тестов, первый прогон на чистой базе был красным —
+    `test_message_with_address_offers_house_choices` искал «Декабристов 10»
+    в пустой таблице, а дома туда коммитил тест, который идёт позже.
+    """
+
+    return await seed(session)
+
+
+@pytest.fixture
+async def tokens(demo_houses: dict[str, list[str]]) -> list[str]:
     """Токены «подъезд» для трёх демо-домов, в порядке HOUSES."""
 
-    links = await seed(session)
-    return [links[h["key"]][0] for h in HOUSES]
+    return [demo_houses[h["key"]][0] for h in HOUSES]
 
 
 @pytest.fixture
@@ -214,7 +226,9 @@ async def test_message_without_house_is_address_search_not_hold(
     assert (await _last(session, user))["text"] == texts.ASK_ADDRESS_HINT
 
 
-async def test_message_with_address_offers_house_choices(session: AsyncSession, user: str) -> None:
+async def test_message_with_address_offers_house_choices(
+    session: AsyncSession, demo_houses: dict[str, list[str]], user: str
+) -> None:
     await _deliver(session, _message(user, "Декабристов 10"), MESSAGE)
 
     reply = await _last(session, user)
