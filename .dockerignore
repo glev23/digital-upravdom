@@ -31,6 +31,10 @@
 !data/seed/**
 !data/masking/
 !data/masking/**
+# Прототипы деградации без LLM (CLASSIFY-002): app.Dockerfile копирует
+# data/classifier — без этой строки сборка падает на COPY (урок DATA-001).
+!data/classifier/
+!data/classifier/**
 !data/test_cases/
 !data/test_cases/**
 
