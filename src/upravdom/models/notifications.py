@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, String
+from sqlalchemy import ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from upravdom.models.base import Base, CreatedAtMixin, UUIDPKMixin
@@ -40,13 +40,23 @@ class Notification(UUIDPKMixin, CreatedAtMixin, Base):
 
 
 class NotificationDelivery(UUIDPKMixin, Base):
-    """Кому фактически доставлено — задел под повтор неудачных отправок.
+    """Кому фактически доставлено — и защита от повторной отправки.
 
     `created_at` добавлено сверх architecture.md §5.3 для сортировки повторов
     (учтено в «Истории решений» architecture.md как реализационное дополнение).
+    Уникальность `(notification_id, user_id)` — миграция `0008` (NOTIFY-001):
+    повторный проход задачи, рестарт приложения и ретрай воркера не шлют
+    жителю второе сообщение.
     """
 
     __tablename__ = "notification_deliveries"
+    __table_args__ = (
+        UniqueConstraint(
+            "notification_id",
+            "user_id",
+            name="uq_notification_deliveries_notification_user",
+        ),
+    )
 
     notification_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("notifications.id"), nullable=False

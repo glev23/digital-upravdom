@@ -93,7 +93,7 @@ def collect(payload: dict[str, object]) -> Scores:
     # мало, а перекрёстные сравнения ловят склейку «всё похоже на всё».
     heads = [(str(g["problem_type"]), list(g["texts"])[0]) for g in groups]
     head_vectors = _vectors([text for _type, text in heads])
-    for (left_i, right_i) in combinations(range(len(heads)), 2):
+    for left_i, right_i in combinations(range(len(heads)), 2):
         score = cosine(head_vectors[left_i], head_vectors[right_i])
         if heads[left_i][0] == heads[right_i][0]:
             reachable.append(score)
@@ -126,7 +126,9 @@ def main() -> int:
         return 1
     payload = json.loads(CASES.read_text(encoding="utf-8"))
     scores = collect(payload)
-    current = args.threshold if args.threshold is not None else get_settings().dedup_similarity_threshold
+    current = (
+        args.threshold if args.threshold is not None else get_settings().dedup_similarity_threshold
+    )
 
     print(
         f"пар «одна авария, разные формулировки»: {len(scores.same)}; "

@@ -15,6 +15,8 @@ from upravdom.bot_gateway.max_client import HttpxMaxClient, MaxClient
 from upravdom.bot_gateway.schemas import parse_webhook_payload
 from upravdom.config import get_settings
 from upravdom.db import session_scope
+from upravdom.models import Notification
+from upravdom.notifications import service as notifications_service
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +81,38 @@ async def process_inbound_batch(*, dispatcher: Dispatcher = default_dispatcher) 
             await inbox.mark_done(session, event.id)
 
 
+async def process_notifications() -> None:
+    """Рассылка уведомлений об отключениях (NOTIFY-001).
+
+    Одна транзакция на уведомление: сбой на одном доме не должен блокировать
+    остальные. Сама отправка — через `outbound_messages` с повторами, своего
+    механизма повторов здесь нет.
+    """
+
+    settings = get_settings()
+    async with session_scope() as session:
+        active = await notifications_service.list_active(session)
+
+    for notification in active:
+        async with session_scope() as session:
+            try:
+                fresh = await session.get(Notification, notification.id)
+                if fresh is None:
+                    continue
+                queued = await notifications_service.dispatch(session, fresh, settings=settings)
+                await session.commit()
+            except Exception as exc:  # noqa: BLE001 — одно уведомление не валит проход
+                await session.rollback()
+                logger.warning(
+                    "notify: уведомление %s не разослано: %s",
+                    notification.id,
+                    type(exc).__name__,
+                )
+                continue
+            if queued:
+                logger.info("notify: уведомление %s — %d доставок", notification.id, queued)
+
+
 async def process_outbound_batch(*, client: MaxClient | None) -> None:
     if client is None:
         return
@@ -124,5 +158,13 @@ def create_scheduler() -> AsyncIOScheduler:
         max_instances=1,
         coalesce=True,
         kwargs={"client": client},
+    )
+    scheduler.add_job(
+        process_notifications,
+        "interval",
+        seconds=settings.notify_poll_interval_seconds,
+        id="notify_worker",
+        max_instances=1,
+        coalesce=True,
     )
     return scheduler

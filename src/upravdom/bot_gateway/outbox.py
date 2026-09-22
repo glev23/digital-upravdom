@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from upravdom.bot_gateway.max_client import MaxClient, MaxPermanentError, MaxTransientError
 from upravdom.models import OutboundMessage
-from upravdom.models.enums import OutboundMessageStatus
+from upravdom.models.enums import DeliveryStatus, OutboundMessageStatus
 
 # Лизинг на время захвата — с запасом над таймаутом HTTP-клиента (10 с),
 # чтобы воркер не "отобрал у себя" ещё не отправленное сообщение.
@@ -49,6 +49,19 @@ class ClaimedMessage:
 
         value = self.payload.get("user_id")
         return str(value) if value else None
+
+    @property
+    def notification_delivery_id(self) -> uuid.UUID | None:
+        """Доставка уведомления, статус которой зависит от результата отправки
+        (NOTIFY-001) — см. `enqueue_message`."""
+
+        value = self.payload.get("notification_delivery_id")
+        if not value:
+            return None
+        try:
+            return uuid.UUID(str(value))
+        except ValueError:
+            return None
 
 
 async def _enqueue(session: AsyncSession, *, address: str, payload: dict[str, object]) -> None:
@@ -75,6 +88,7 @@ async def enqueue_message(
     user_id: str | None = None,
     text_: str,
     attachments: list[dict[str, object]] | None = None,
+    notification_delivery_id: uuid.UUID | None = None,
 ) -> None:
     """Единственный способ отправить сообщение в MAX. Фиксирует вызывающий код.
 
@@ -88,6 +102,11 @@ async def enqueue_message(
     `max_user_id`; способ адресации различается по ключу `user_id` в payload
     (тот же приём, что у `callback_id` ниже) — новой колонки и миграции это
     не требует.
+
+    `notification_delivery_id` (NOTIFY-001) связывает сообщение с записью
+    `notification_deliveries`: её статус должен отражать **реальную** отправку
+    в MAX, а не факт постановки в очередь, поэтому переводит доставку в
+    `sent`/`failed` именно `send_claimed`.
     """
 
     payload: dict[str, object] = {"text": text_}
@@ -95,6 +114,8 @@ async def enqueue_message(
         payload["attachments"] = attachments
     if user_id is not None:
         payload["user_id"] = user_id
+    if notification_delivery_id is not None:
+        payload["notification_delivery_id"] = str(notification_delivery_id)
     await _enqueue(session, address=_address(chat_id, user_id), payload=payload)
 
 
@@ -159,11 +180,38 @@ def _backoff_seconds(attempts: int, *, base_seconds: float) -> float:
     return float(base_seconds * (2 ** max(attempts - 1, 0)))
 
 
-async def _mark_sent(session: AsyncSession, message_id: uuid.UUID) -> None:
+async def _mark_delivery(
+    session: AsyncSession,
+    delivery_id: uuid.UUID | None,
+    *,
+    status: DeliveryStatus,
+    error: str | None = None,
+) -> None:
+    """Статус доставки уведомления по результату реальной отправки (NOTIFY-001).
+
+    В `error` — тип исключения, не его текст: в сообщении внешнего сервиса
+    может оказаться что угодно, включая payload (architecture.md §11).
+    """
+
+    if delivery_id is None:
+        return
+    values: dict[str, object] = {"id": delivery_id, "status": status.value, "error": error}
+    sent_at = "now()" if status is DeliveryStatus.SENT else "NULL"
+    await session.execute(
+        text(
+            "UPDATE notification_deliveries "
+            f"SET status = :status, error = :error, sent_at = {sent_at} WHERE id = :id"
+        ),
+        values,
+    )
+
+
+async def _mark_sent(session: AsyncSession, message: ClaimedMessage) -> None:
     await session.execute(
         text("UPDATE outbound_messages SET status = 'sent', sent_at = now() WHERE id = :id"),
-        {"id": message_id},
+        {"id": message.id},
     )
+    await _mark_delivery(session, message.notification_delivery_id, status=DeliveryStatus.SENT)
     await session.commit()
 
 
@@ -181,10 +229,18 @@ async def _mark_retry(
     await session.commit()
 
 
-async def _mark_failed(session: AsyncSession, message_id: uuid.UUID, *, error: str) -> None:
+async def _mark_failed(
+    session: AsyncSession, message: ClaimedMessage, *, error: str, error_type: str
+) -> None:
     await session.execute(
         text("UPDATE outbound_messages SET status = 'failed', last_error = :error WHERE id = :id"),
-        {"id": message_id, "error": error},
+        {"id": message.id, "error": error},
+    )
+    await _mark_delivery(
+        session,
+        message.notification_delivery_id,
+        status=DeliveryStatus.FAILED,
+        error=error_type,
     )
     await session.commit()
 
@@ -223,13 +279,17 @@ async def send_claimed(
                 attachments=message.payload.get("attachments"),
             )
     except MaxPermanentError as exc:
-        await _mark_failed(session, message.id, error=str(exc)[:500])
+        await _mark_failed(session, message, error=str(exc)[:500], error_type=type(exc).__name__)
         return
     except MaxTransientError as exc:
         if message.attempts >= max_attempts:
-            await _mark_failed(session, message.id, error=str(exc)[:500])
+            await _mark_failed(
+                session, message, error=str(exc)[:500], error_type=type(exc).__name__
+            )
         else:
+            # Доставка остаётся `pending`: повторы делает сама очередь, свой
+            # второй механизм повторов уведомлениям не нужен (NOTIFY-001).
             delay = _backoff_seconds(message.attempts, base_seconds=backoff_base_seconds)
             await _mark_retry(session, message.id, delay_seconds=delay, error=str(exc)[:500])
         return
-    await _mark_sent(session, message.id)
+    await _mark_sent(session, message)

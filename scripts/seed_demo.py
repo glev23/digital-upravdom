@@ -274,10 +274,10 @@ async def seed(session: AsyncSession) -> dict[str, list[str]]:
             "resource_type": ResourceType.COLD_WATER,
             "starts_at": now + timedelta(days=2),
             "ends_at": now + timedelta(days=2, hours=8),
-            "message": (
-                "Плановое отключение холодного водоснабжения "
-                "2 дня с 09:00 до 17:00 — профилактические работы (тест)."
-            ),
+            # Без конкретного времени в тексте: дату и время житель видит из
+            # полей `starts_at`/`ends_at` (NOTIFY-001), а прошитая в строку
+            # «2 дня с 09:00 до 17:00» с ними расходилась.
+            "message": "Профилактические работы на сетях.",
         },
         {
             "key": "notif-emergency-electricity",
@@ -286,9 +286,14 @@ async def seed(session: AsyncSession) -> dict[str, list[str]]:
             "resource_type": ResourceType.ELECTRICITY,
             "starts_at": now - timedelta(minutes=30),
             "ends_at": None,
-            "message": "Аварийное отключение электроснабжения, ведутся работы (тест).",
+            "message": "Ведутся аварийно-восстановительные работы.",
         },
     ]
+    # `DO NOTHING`, а не `DO UPDATE` (NOTIFY-001): сид выполняется на каждом
+    # старте контейнера, и перезапись `ends_at` «воскрешала» бы аварию,
+    # завершённую через `scripts/notify.py close`, а сдвиг `starts_at`
+    # заново рассылал бы плановое уведомление. Идемпотентность сохраняется:
+    # повторный запуск по-прежнему не создаёт вторую строку.
     for n in notifications:
         stmt = (
             pg_insert(Notification)
@@ -302,14 +307,7 @@ async def seed(session: AsyncSession) -> dict[str, list[str]]:
                 message=n["message"],
                 source=NotificationSource.TEST_DATA,
             )
-            .on_conflict_do_update(
-                index_elements=["id"],
-                set_={
-                    "starts_at": n["starts_at"],
-                    "ends_at": n["ends_at"],
-                    "message": n["message"],
-                },
-            )
+            .on_conflict_do_nothing(index_elements=["id"])
         )
         await session.execute(stmt)
 

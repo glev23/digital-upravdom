@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     # Часовой пояс дома для срока в ответах жителю (FLOW-001).
     display_timezone: str = Field(default="Europe/Moscow", alias="DISPLAY_TIMEZONE")
 
+    # --- Уведомления об отключениях (architecture.md §5.3, NOTIFY-001) --------
+    notify_poll_interval_seconds: float = Field(default=60.0, alias="NOTIFY_POLL_INTERVAL_SECONDS")
+    # Ограничение прохода: большой дом не должен занимать воркер целиком.
+    notify_batch_size: int = Field(default=200, alias="NOTIFY_BATCH_SIZE")
+
     # --- Дедупликация массовых обращений (architecture.md §6.5) ---------------
     # За пределами окна это уже новая авария, даже если формулировка совпала.
     dedup_window_hours: int = Field(default=6, alias="DEDUP_WINDOW_HOURS")
