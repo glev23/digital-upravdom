@@ -7,6 +7,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON,
+    REAL,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -16,6 +17,7 @@ from sqlalchemy import (
     String,
     text,
 )
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
 
 from upravdom.models.base import Base, UUIDPKMixin
@@ -83,7 +85,12 @@ class Ticket(UUIDPKMixin, Base):
         default=TicketStatus.ACCEPTED,
     )
     due_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # Задел DB-001 под вектор в Qdrant. Остаётся неиспользуемым: дедупликация
+    # сравнивает векторы заявок одного дома напрямую в Postgres, чтобы
+    # недоступность Qdrant её не ломала (architecture.md §6.5, §9).
     embedding_point_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    # Эмбеддинг маскированного текста обращения, dim 768 (DEDUP-001, 0007).
+    text_embedding: Mapped[list[float] | None] = mapped_column(ARRAY(REAL), nullable=True)
     source_event_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("inbound_events.id"), nullable=True
     )

@@ -16,12 +16,15 @@ from upravdom.tickets.service import (
     TicketNotFound,
     change_status,
     count_joined_subscribers,
+    create_merged_ticket,
     create_ticket,
     get_by_number,
+    get_by_source_event,
     get_for_user,
     list_for_user,
     list_history_events,
     reroute,
+    split_merged,
 )
 from upravdom.tickets.texts import format_ticket_number, status_label
 
@@ -34,9 +37,11 @@ __all__ = [
     "TicketNotFound",
     "change_status",
     "count_joined_subscribers",
+    "create_merged_ticket",
     "create_ticket",
     "format_ticket_number",
     "get_by_number",
+    "get_by_source_event",
     "get_for_user",
     "list_for_user",
     "list_history_events",
@@ -44,6 +49,7 @@ __all__ = [
     "org_display",
     "reroute",
     "resolve_addressee",
+    "split_merged",
     "status_label",
     "subscriber_max_user_ids",
 ]

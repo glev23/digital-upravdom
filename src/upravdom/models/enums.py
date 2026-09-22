@@ -70,12 +70,14 @@ class TicketStatus(StrEnum):
 
 
 class TicketEventType(StrEnum):
-    """Закрытый перечень событий истории заявки (TICKET-001)."""
+    """Закрытый перечень событий истории заявки (TICKET-001, DEDUP-001)."""
 
     CREATED = "created"
     STATUS_CHANGED = "status_changed"
     ROUTED = "routed"
     SUBSCRIBER_JOINED = "subscriber_joined"
+    # Выход жителя из склейки «Это другая проблема» (DEDUP-001, миграция 0007).
+    SUBSCRIBER_LEFT = "subscriber_left"
 
 
 class JoinReason(StrEnum):

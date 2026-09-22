@@ -16,6 +16,8 @@ from upravdom.bot_gateway.inbox import ClaimedEvent, get_or_create_user
 from upravdom.bot_gateway.rate_limit import RateLimiter
 from upravdom.bot_gateway.schemas import parse_webhook_payload
 from upravdom.config import get_settings
+from upravdom.dedup import handlers as dedup_handlers
+from upravdom.dedup.callbacks import PREFIX as DEDUP_PREFIX
 from upravdom.flow import handlers as flow_handlers
 from upravdom.flow.callbacks import PREFIX as FLOW_PREFIX
 from upravdom.onboarding import handlers as onboarding_handlers
@@ -44,12 +46,15 @@ async def noop_handler(_session: AsyncSession, _event: ClaimedEvent) -> None:
 
 
 async def route_callback(session: AsyncSession, event: ClaimedEvent) -> None:
-    """Маршрутизация кнопок: onb: → онбординг, clf: → основной сценарий."""
+    """Маршрутизация кнопок: onb: → онбординг, clf: → сценарий, ddp: → склейка."""
 
     parsed = parse_webhook_payload(event.payload)
     payload = parsed.text or ""
     if payload.startswith(f"{FLOW_PREFIX}:"):
         await flow_handlers.on_callback(session, event)
+        return
+    if payload.startswith(f"{DEDUP_PREFIX}:"):
+        await dedup_handlers.on_callback(session, event)
         return
     if payload.startswith(f"{ONB_PREFIX}:"):
         await onboarding_handlers.on_callback(session, event)

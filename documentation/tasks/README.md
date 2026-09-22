@@ -140,7 +140,7 @@
 | [TICKET-001](./ticket-001.md) | `done` |
 | [FLOW-001](./flow-001.md) | `done` |
 | [CLASSIFY-003](./classify-003.md) | `ready` |
-| [DEDUP-001](./dedup-001.md) | `ready` |
+| [DEDUP-001](./dedup-001.md) | `done` |
 | [NOTIFY-001](./notify-001.md) | `ready` |
 | [RIGHTS-001](./rights-001.md) | `ready` |
 | [STATUS-001](./status-001.md) | `done` |

@@ -311,6 +311,185 @@ async def reroute(
     return ticket
 
 
+async def create_merged_ticket(
+    session: AsyncSession,
+    *,
+    head: Ticket,
+    user_id: uuid.UUID,
+    house_id: uuid.UUID,
+    raw_text: str,
+    problem_type: str,
+    responsibility_zone: ResponsibilityZone,
+    confidence: float,
+    text_embedding: list[float] | None = None,
+    source_event_id: uuid.UUID | None = None,
+    actor: str = "system",
+    now: datetime | None = None,
+) -> Ticket:
+    """Заявка-дубль сразу в статусе `merged` (DEDUP-001).
+
+    Отдельная функция, а не `create_ticket` + `change_status`: таблица
+    переходов намеренно запрещает переход в `merged`. Обращение жителя не
+    исчезает — остаётся строкой со ссылкой на головную (architecture.md §5.2).
+    """
+
+    now = now or datetime.now(UTC)
+
+    if source_event_id is not None:
+        existing = await get_by_source_event(session, source_event_id)
+        if existing is not None:
+            return existing
+
+    house = await session.get(House, house_id)
+    pt = await session.get(ProblemType, problem_type)
+    if pt is None:
+        msg = f"неизвестный problem_type: {problem_type}"
+        raise TicketError(msg)
+
+    if head.dedup_group_id is None:
+        head.dedup_group_id = head.id
+
+    ticket = Ticket(
+        id=uuid.uuid4(),
+        user_id=user_id,
+        house_id=house_id,
+        management_company_id=house.management_company_id if house else None,
+        raw_text=raw_text,
+        problem_type=problem_type,
+        responsibility_zone=responsibility_zone,
+        confidence=confidence,
+        routed_to_org_type=None,
+        routed_to_org_id=None,
+        status=TicketStatus.MERGED,
+        due_at=None,
+        text_embedding=text_embedding,
+        source_event_id=source_event_id,
+        dedup_group_id=head.dedup_group_id,
+        duplicate_of_ticket_id=head.id,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(ticket)
+    await session.flush()
+    await session.refresh(ticket, attribute_names=["number"])
+
+    session.add(
+        TicketEvent(
+            id=uuid.uuid4(),
+            ticket_id=ticket.id,
+            event_type=TicketEventType.CREATED.value,
+            from_status=None,
+            to_status=TicketStatus.MERGED,
+            actor=actor,
+            payload={
+                "problem_type": problem_type,
+                "responsibility_zone": responsibility_zone.value,
+                "duplicate_of_ticket_number": head.number,
+            },
+            created_at=now,
+        )
+    )
+    # Автор остаётся автором своего обращения (инвариант TICKET-001); из выдачи
+    # статуса merged-строка убрана в `list_for_user`, чтобы житель не видел
+    # свой дубль рядом с головной заявкой.
+    session.add(
+        TicketSubscriber(
+            ticket_id=ticket.id,
+            user_id=user_id,
+            is_author=True,
+            joined_at=now,
+            join_reason=JoinReason.AUTHOR,
+        )
+    )
+    await session.flush()
+    return ticket
+
+
+async def split_merged(
+    session: AsyncSession,
+    merged: Ticket,
+    *,
+    actor: str = "resident",
+    now: datetime | None = None,
+) -> Ticket:
+    """Выход из склейки: merged → обычная заявка со своим адресатом и сроком.
+
+    Единственный разрешённый переход из `merged` — общая таблица переходов
+    его по-прежнему запрещает (DEDUP-001). Ложная склейка дороже пропущенного
+    дубля, поэтому выход обязателен (architecture.md §6.5).
+    """
+
+    now = now or datetime.now(UTC)
+    if merged.status is not TicketStatus.MERGED:
+        raise InvalidStatusTransition(merged.status, TicketStatus.ACCEPTED)
+
+    head_id = merged.duplicate_of_ticket_id
+    pt = await session.get(ProblemType, merged.problem_type)
+    addressee = await resolve_addressee(
+        session, merged.house_id, merged.responsibility_zone, merged.problem_type, on=now
+    )
+    to_status = (
+        TicketStatus.NEEDS_DISPATCHER
+        if merged.responsibility_zone is ResponsibilityZone.UNKNOWN
+        else TicketStatus.ACCEPTED
+    )
+
+    merged.status = to_status
+    merged.duplicate_of_ticket_id = None
+    merged.routed_to_org_type = addressee.org_type
+    merged.routed_to_org_id = addressee.org_id
+    merged.due_at = (
+        now + timedelta(hours=pt.resolution_hours)
+        if pt is not None and pt.resolution_hours is not None
+        else None
+    )
+    merged.updated_at = now
+
+    session.add(
+        TicketEvent(
+            id=uuid.uuid4(),
+            ticket_id=merged.id,
+            event_type=TicketEventType.STATUS_CHANGED.value,
+            from_status=TicketStatus.MERGED,
+            to_status=to_status,
+            actor=actor,
+            payload=None,
+            created_at=now,
+        )
+    )
+
+    head = await session.get(Ticket, head_id) if head_id is not None else None
+    if head is not None:
+        # Автора головной заявки не отписываем: он подписан как автор, а не
+        # склейкой, и остался бы без статуса собственного обращения.
+        subscription = await session.get(TicketSubscriber, (head.id, merged.user_id))
+        if subscription is not None and not subscription.is_author:
+            await session.delete(subscription)
+        session.add(
+            TicketEvent(
+                id=uuid.uuid4(),
+                ticket_id=head.id,
+                event_type=TicketEventType.SUBSCRIBER_LEFT.value,
+                from_status=None,
+                to_status=head.status,
+                actor=actor,
+                payload={"split_ticket_number": merged.number},
+                created_at=now,
+            )
+        )
+
+    await session.flush()
+    return merged
+
+
+async def get_by_source_event(session: AsyncSession, source_event_id: uuid.UUID) -> Ticket | None:
+    """Заявка, уже созданная этим входящим событием (идемпотентность TICKET-001)."""
+
+    return (
+        await session.execute(select(Ticket).where(Ticket.source_event_id == source_event_id))
+    ).scalar_one_or_none()
+
+
 async def get_for_user(session: AsyncSession, number: int, user_id: uuid.UUID) -> Ticket | None:
     """Заявка по номеру только для подписчика. Чужой ≡ несуществующий."""
 
@@ -328,7 +507,12 @@ async def get_for_user(session: AsyncSession, number: int, user_id: uuid.UUID) -
 async def list_for_user(
     session: AsyncSession, user_id: uuid.UUID, *, limit: int = 5
 ) -> list[Ticket]:
-    """Открытые первыми, не больше limit."""
+    """Открытые первыми, не больше limit.
+
+    Склеенные обращения жителю не показываются: он подписан на головную
+    заявку и видит её, а собственный дубль в списке выглядел бы второй
+    заявкой о той же аварии (DEDUP-001).
+    """
 
     rows = (
         (
@@ -338,7 +522,10 @@ async def list_for_user(
                     TicketSubscriber,
                     TicketSubscriber.ticket_id == Ticket.id,
                 )
-                .where(TicketSubscriber.user_id == user_id)
+                .where(
+                    TicketSubscriber.user_id == user_id,
+                    Ticket.status != TicketStatus.MERGED,
+                )
                 .order_by(
                     Ticket.status.in_(_OPEN_STATUSES).desc(),
                     Ticket.created_at.desc(),

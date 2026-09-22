@@ -62,6 +62,15 @@ class Settings(BaseSettings):
     # Часовой пояс дома для срока в ответах жителю (FLOW-001).
     display_timezone: str = Field(default="Europe/Moscow", alias="DISPLAY_TIMEZONE")
 
+    # --- Дедупликация массовых обращений (architecture.md §6.5) ---------------
+    # За пределами окна это уже новая авария, даже если формулировка совпала.
+    dedup_window_hours: int = Field(default=6, alias="DEDUP_WINDOW_HOURS")
+    # Откалибровано на data/test_cases/dedup_cases.json (DEDUP-001): 0.88 из
+    # architecture.md §6.5 было допущением и не склеивало ничего. На 0.80 —
+    # ноль ложных склеек с запасом над худшей парой (0.779) и 88% почти
+    # дословных повторов соседей.
+    dedup_similarity_threshold: float = Field(default=0.80, alias="DEDUP_SIMILARITY_THRESHOLD")
+
     # --- Персональные данные (architecture.md §11.1) --------------------------
     consent_version: int = Field(default=1, alias="CONSENT_VERSION")
     privacy_policy_url: str | None = Field(default=None, alias="PRIVACY_POLICY_URL")

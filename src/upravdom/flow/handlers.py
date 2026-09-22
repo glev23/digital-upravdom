@@ -5,8 +5,6 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +15,9 @@ from upravdom.bot_gateway.schemas import parse_webhook_payload
 from upravdom.classifier import Branch, Clarification, ClassificationResult, classify
 from upravdom.classifier.llm import LlmClient
 from upravdom.config import Settings, get_settings
+from upravdom.dedup import texts as dedup_texts
+from upravdom.dedup.callbacks import encode_split
+from upravdom.dedup.service import embed_message, find_candidate, subscribe_to_head
 from upravdom.flow import texts
 from upravdom.flow.callbacks import (
     FlowAction,
@@ -32,13 +33,15 @@ from upravdom.models import (
     Ticket,
     TicketEvent,
 )
-from upravdom.models.enums import ResponsibilityZone, TicketEventType
+from upravdom.models.enums import ResponsibilityZone, TicketEventType, TicketStatus
 from upravdom.onboarding import service as onboarding_service
 from upravdom.onboarding.callbacks import inline_keyboard
 from upravdom.tickets import (
     count_joined_subscribers,
+    create_merged_ticket,
     create_ticket,
     format_ticket_number,
+    get_by_source_event,
     get_for_user,
     list_for_user,
     list_history_events,
@@ -47,6 +50,7 @@ from upravdom.tickets import (
     status_label,
 )
 from upravdom.tickets import texts as ticket_texts
+from upravdom.tickets.due import format_due, local_short, norm_label
 
 logger = logging.getLogger(__name__)
 
@@ -65,33 +69,8 @@ async def _send(
     await outbox.enqueue_message(session, chat_id=chat_id, text_=text_, attachments=attachments)
 
 
-# Ссылка на акт внутри norm_reference: «ПП РФ №354, приложение 1, п.1»,
-# «ПП РФ №491, п.2, подп. «е»». Всё остальное в справочнике — служебные пояснения
-# («NULL», «см. db-001.md»), которые жителю показывать нельзя.
-_NORM_CITE = re.compile(r"ПП РФ №\s?\d+(?:,\s*[^:;()]+?)?(?=[:;()]|\.\s+[А-ЯЁ]|\.$|$)")
-
-
-def _norm_label(norm_reference: str) -> str:
-    """Только сама норма; пустая строка, если ссылки на акт в справочнике нет."""
-
-    match = _NORM_CITE.search(norm_reference)
-    return match.group(0).strip() if match else ""
-
-
-def _local_until(due_at: datetime, tz_name: str) -> str:
-    try:
-        tz = ZoneInfo(tz_name)
-    except Exception:  # noqa: BLE001
-        tz = ZoneInfo("Europe/Moscow")
-    return due_at.astimezone(tz).strftime("%d.%m.%Y %H:%M")
-
-
-def _format_due(due_at: datetime | None, norm_reference: str, tz_name: str) -> str:
-    norm = _norm_label(norm_reference)
-    if due_at is None:
-        return texts.NO_DUE_LINE.format(norm=norm) if norm else texts.NO_DUE_LINE_BARE
-    return texts.DUE_LINE.format(until=_local_until(due_at, tz_name), norm=norm)
-
+# Формулировка срока и разбор norm_reference — в `tickets/due.py`: те же слова
+# использует сообщение о присоединении к существующей заявке (DEDUP-001).
 
 # Системы, для которых ПП №416 п. 13 задаёт сроки локализации/устранения аварии.
 _ADS_DEADLINE_TYPES = frozenset({"cold_water", "hot_water", "sewage", "heating", "electricity"})
@@ -103,7 +82,7 @@ def _basis_line(result: ClassificationResult, norm_reference: str) -> str:
         snippet = " ".join(cite.body.split())[:120]
         return f"Основание: {cite.label}" + (f" — {snippet}…" if snippet else "")
     # Без подтверждённого чанка — только сама норма из справочника, не текст модели.
-    short = _norm_label(norm_reference)
+    short = norm_label(norm_reference)
     return f"Основание: {short}" if short else "Основание: по справочнику типов проблем"
 
 
@@ -113,14 +92,6 @@ async def _org_display(
     # Разбор полиморфного адресата переехал в tickets.routing (STATUS-001):
     # его же использует лента истории и уведомления подписчикам.
     return await org_display(session, org_type, org_id)
-
-
-def _local_short(moment: datetime, tz_name: str) -> str:
-    try:
-        tz = ZoneInfo(tz_name)
-    except Exception:  # noqa: BLE001
-        tz = ZoneInfo("Europe/Moscow")
-    return moment.astimezone(tz).strftime("%d.%m %H:%M")
 
 
 async def _history_event_text(session: AsyncSession, event: TicketEvent) -> str:
@@ -150,7 +121,7 @@ async def _history_event_text(session: AsyncSession, event: TicketEvent) -> str:
 async def _history_lines(session: AsyncSession, ticket: Ticket, tz_name: str) -> list[str]:
     events = await list_history_events(session, ticket.id)
     lines = [
-        f"• {_local_short(event.created_at, tz_name)} — {await _history_event_text(session, event)}"
+        f"• {local_short(event.created_at, tz_name)} — {await _history_event_text(session, event)}"
         for event in events
     ]
     joined = await count_joined_subscribers(session, ticket.id)
@@ -179,6 +150,112 @@ async def _link_log_ticket(
     await session.execute(
         update(ClassificationLog).where(ClassificationLog.id == log_id).values(ticket_id=ticket_id)
     )
+
+
+def _merged_keyboard(merged_number: int, head_number: int) -> list[dict[str, object]]:
+    """«Это другая проблема» обязательна рядом со статусом: ложная склейка
+    дороже пропущенного дубля (architecture.md §6.5)."""
+
+    return inline_keyboard(
+        [
+            [(dedup_texts.BTN_OTHER_PROBLEM, encode_split(merged_number))],
+            [(texts.BTN_STATUS, encode_status(head_number))],
+        ]
+    )
+
+
+async def _repeat_merged_reply(
+    session: AsyncSession, *, chat_id: str, merged: Ticket, settings: Settings
+) -> None:
+    head = (
+        await session.get(Ticket, merged.duplicate_of_ticket_id)
+        if merged.duplicate_of_ticket_id
+        else None
+    )
+    if head is None:
+        return
+    head_pt = await session.get(ProblemType, head.problem_type)
+    due = format_due(
+        head.due_at, head_pt.norm_reference if head_pt else "", settings.display_timezone
+    )
+    body = dedup_texts.JOINED.format(
+        number=format_ticket_number(head.number), status=status_label(head.status)
+    )
+    await _send(session, chat_id, f"{body}\n{due}", _merged_keyboard(merged.number, head.number))
+
+
+async def _try_merge(
+    session: AsyncSession,
+    *,
+    chat_id: str,
+    user_id: uuid.UUID,
+    house_id: uuid.UUID,
+    raw_text: str,
+    problem_type: str,
+    responsibility_zone: ResponsibilityZone,
+    source_event_id: uuid.UUID,
+    result: ClassificationResult,
+    settings: Settings,
+) -> bool:
+    """True — обращение склеено с открытой заявкой, отдельная заявка не нужна.
+
+    Любой сбой внутри — False и обычное создание заявки: ни один отказ этого
+    модуля не блокирует основной сценарий (architecture.md §6.5).
+    """
+
+    embedding = await embed_message(raw_text)
+    if embedding is None:
+        return False
+
+    candidate = await find_candidate(
+        session,
+        house_id=house_id,
+        problem_type=problem_type,
+        author_id=user_id,
+        embedding=embedding,
+        settings=settings,
+    )
+    if candidate is None:
+        return False
+
+    head = candidate.head
+    merged = await create_merged_ticket(
+        session,
+        head=head,
+        user_id=user_id,
+        house_id=house_id,
+        raw_text=raw_text,
+        problem_type=problem_type,
+        responsibility_zone=responsibility_zone,
+        confidence=float(result.confidence),
+        text_embedding=embedding,
+        source_event_id=source_event_id,
+    )
+    # Журнал классификации указывает на собственную (merged) строку.
+    await _link_log_ticket(session, result.log_id, merged.id)
+
+    head_number = format_ticket_number(head.number)
+    head_pt = await session.get(ProblemType, head.problem_type)
+    due = format_due(
+        head.due_at, head_pt.norm_reference if head_pt else "", settings.display_timezone
+    )
+
+    if candidate.author_already_subscribed:
+        # Повтор того же жителя: второй подписки и второго события нет.
+        body = dedup_texts.ALREADY_YOURS.format(
+            number=head_number, status=status_label(head.status)
+        )
+    else:
+        await subscribe_to_head(session, head=head, user_id=user_id, merged_number=merged.number)
+        body = dedup_texts.JOINED.format(number=head_number, status=status_label(head.status))
+
+    await _send(
+        session,
+        chat_id,
+        f"{body}\n{due}",
+        _merged_keyboard(merged.number, head.number),
+    )
+    return True
 
 
 async def _respond_result(
@@ -239,16 +316,45 @@ async def _respond_result(
         # Дом без УК — как unknown с общим контактом.
         create_zone = ResponsibilityZone.UNKNOWN
 
+    problem_type = result.problem_type if result.problem_type else "other"
+
+    existing = await get_by_source_event(session, source_event_id)
+    if existing is not None and existing.status is TicketStatus.MERGED:
+        # Ретрай воркера по уже склеенному обращению: второй склейки и второй
+        # подписки быть не должно, ответ повторяем тот же.
+        await _repeat_merged_reply(session, chat_id=chat_id, merged=existing, settings=settings)
+        return
+
+    # Дедупликация — после классификации и до создания заявки (§6.5).
+    if existing is None:
+        merged = await _try_merge(
+            session,
+            chat_id=chat_id,
+            user_id=user_id,
+            house_id=house_id,
+            raw_text=raw_text,
+            problem_type=problem_type,
+            responsibility_zone=create_zone,
+            source_event_id=source_event_id,
+            result=result,
+            settings=settings,
+        )
+        if merged:
+            return
+
     ticket = await create_ticket(
         session,
         user_id=user_id,
         house_id=house_id,
         raw_text=raw_text,
-        problem_type=result.problem_type if result.problem_type else "other",
+        problem_type=problem_type,
         responsibility_zone=create_zone,
         confidence=float(result.confidence),
         source_event_id=source_event_id,
     )
+    # Вектор обращения нужен, чтобы к этой заявке могли присоединиться соседи.
+    if ticket.text_embedding is None:
+        ticket.text_embedding = await embed_message(raw_text)
     await _link_log_ticket(session, result.log_id, ticket.id)
 
     number = format_ticket_number(ticket.number)
@@ -262,7 +368,7 @@ async def _respond_result(
     if name is None:
         name = addressee.name or "организация"
         phone = addressee.contact
-    due = _format_due(ticket.due_at, norm_ref, settings.display_timezone)
+    due = format_due(ticket.due_at, norm_ref, settings.display_timezone)
     phone_line = phone or texts.NO_UK_CONTACT
     lines = [
         f"Заявка {number} принята. Отвечает: {name}. Аварийная служба: {phone_line}.",
@@ -293,7 +399,7 @@ async def _handle_status(
         )
         pt = await session.get(ProblemType, ticket.problem_type)
         norm = pt.norm_reference if pt else ""
-        due = _format_due(ticket.due_at, norm, settings.display_timezone)
+        due = format_due(ticket.due_at, norm, settings.display_timezone)
         head = (
             f"{format_ticket_number(ticket.number)} — {status_label(ticket.status)}. "
             f"Адресат: {name or '—'}. {due}"
