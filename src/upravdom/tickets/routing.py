@@ -114,6 +114,27 @@ async def resolve_addressee(
     return await _uk_addressee(session, mc_id)
 
 
+async def org_display(
+    session: AsyncSession, org_type: ResponsibilityZone | None, org_id: uuid.UUID | None
+) -> tuple[str | None, str | None]:
+    """Название и контакт адресата по полям заявки — `(name, contact)`.
+
+    Адресат полиморфный (УК или РСО, без FK — см. `models/tickets.py`),
+    поэтому разбор типа нужен и в ответе жителю (FLOW-001), и в истории с
+    уведомлениями (STATUS-001) — одна функция на всех.
+    """
+
+    if org_id is None or org_type is None:
+        return None, None
+    if org_type is ResponsibilityZone.UK:
+        mc = await session.get(ManagementCompany, org_id)
+        return (mc.name, mc.ads_phone) if mc else (None, None)
+    if org_type is ResponsibilityZone.RSO:
+        ro = await session.get(ResourceOrganization, org_id)
+        return (ro.name, ro.contact) if ro else (None, None)
+    return None, None
+
+
 async def _uk_addressee(session: AsyncSession, mc_id: uuid.UUID | None) -> Addressee:
     if mc_id is None:
         return Addressee(

@@ -64,7 +64,8 @@ COPY data/masking ./data/masking
 COPY data/classifier ./data/classifier
 COPY scripts/entrypoint.sh scripts/seed_problem_types.py scripts/seed_demo.py \
      scripts/load_kb.py scripts/reindex.py scripts/build_kb.py \
-     scripts/build_prototypes.py scripts/ticket_status.py ./scripts/
+     scripts/build_prototypes.py scripts/ticket_status.py scripts/ticket_reroute.py \
+     ./scripts/
 
 RUN uv sync --frozen --no-dev
 

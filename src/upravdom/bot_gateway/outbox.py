@@ -43,8 +43,15 @@ class ClaimedMessage:
     def text(self) -> str:
         return str(self.payload.get("text", ""))
 
+    @property
+    def user_id(self) -> str | None:
+        """Адресация по `user_id` вместо `chat_id` (STATUS-001) — см. `enqueue_message`."""
 
-async def _enqueue(session: AsyncSession, *, chat_id: str, payload: dict[str, object]) -> None:
+        value = self.payload.get("user_id")
+        return str(value) if value else None
+
+
+async def _enqueue(session: AsyncSession, *, address: str, payload: dict[str, object]) -> None:
     # Без commit: запись фиксируется вместе с остальными эффектами
     # обработчика и отметкой события `done` (scheduler.process_inbound_batch)
     # — при сбое обработчика откатывается и она, ответ-полуфабрикат не уходит.
@@ -52,7 +59,7 @@ async def _enqueue(session: AsyncSession, *, chat_id: str, payload: dict[str, ob
     # голого SQL (наступили на это в BOT-001).
     stmt = pg_insert(OutboundMessage).values(
         id=uuid.uuid4(),
-        max_chat_id=chat_id,
+        max_chat_id=address,
         payload=payload,
         status=OutboundMessageStatus.PENDING,
         attempts=0,
@@ -64,16 +71,31 @@ async def _enqueue(session: AsyncSession, *, chat_id: str, payload: dict[str, ob
 async def enqueue_message(
     session: AsyncSession,
     *,
-    chat_id: str,
+    chat_id: str | None = None,
+    user_id: str | None = None,
     text_: str,
     attachments: list[dict[str, object]] | None = None,
 ) -> None:
-    """Единственный способ отправить сообщение в MAX. Фиксирует вызывающий код."""
+    """Единственный способ отправить сообщение в MAX. Фиксирует вызывающий код.
+
+    Адресат — ровно один из двух (`POST /messages`, max_api.md §7). Ответ в
+    текущем диалоге идёт по `chat_id` из события; уведомление подписчику
+    заявки — по `user_id` (STATUS-001): в `users` хранится только
+    `max_user_id`, и `chat_id` диалога с ботом ему не равен.
+
+    `outbound_messages.max_chat_id` — ключ доставки и порядка в очереди, он
+    NOT NULL, поэтому при адресации по жителю туда кладётся тот же
+    `max_user_id`; способ адресации различается по ключу `user_id` в payload
+    (тот же приём, что у `callback_id` ниже) — новой колонки и миграции это
+    не требует.
+    """
 
     payload: dict[str, object] = {"text": text_}
     if attachments:
         payload["attachments"] = attachments
-    await _enqueue(session, chat_id=chat_id, payload=payload)
+    if user_id is not None:
+        payload["user_id"] = user_id
+    await _enqueue(session, address=_address(chat_id, user_id), payload=payload)
 
 
 async def enqueue_callback_answer(
@@ -83,9 +105,16 @@ async def enqueue_callback_answer(
 
     await _enqueue(
         session,
-        chat_id=chat_id,
+        address=chat_id,
         payload={"callback_id": callback_id, "notification": notification},
     )
+
+
+def _address(chat_id: str | None, user_id: str | None) -> str:
+    if (chat_id is None) == (user_id is None):
+        msg = "нужен ровно один адресат: chat_id или user_id"
+        raise ValueError(msg)
+    return chat_id if chat_id is not None else str(user_id)
 
 
 async def claim_batch(session: AsyncSession, *, batch_size: int) -> list[ClaimedMessage]:
@@ -180,6 +209,12 @@ async def send_claimed(
             await client.answer_callback(
                 callback_id=str(callback_id),
                 notification=str(message.payload.get("notification", "")),
+            )
+        elif message.user_id is not None:
+            await client.send_message(
+                user_id=message.user_id,
+                text=message.text,
+                attachments=message.payload.get("attachments"),
             )
         else:
             await client.send_message(

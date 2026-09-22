@@ -5,9 +5,10 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from upravdom.config import Settings
 from upravdom.models import House, ProblemType, Ticket, TicketEvent, TicketSubscriber
 from upravdom.models.enums import (
     JoinReason,
@@ -15,7 +16,9 @@ from upravdom.models.enums import (
     TicketEventType,
     TicketStatus,
 )
-from upravdom.tickets.routing import Addressee, resolve_addressee
+from upravdom.tickets.notify import notify_subscribers
+from upravdom.tickets.routing import Addressee, org_display, resolve_addressee
+from upravdom.tickets.texts import rerouted_notice, status_changed_notice
 
 # Разрешённые переходы. merged — только DEDUP-001.
 _TRANSITIONS: dict[TicketStatus, frozenset[TicketStatus]] = {
@@ -46,6 +49,9 @@ _OPEN_STATUSES = frozenset(
     }
 )
 
+# Переадресовывать нечего: заявка либо закрыта, либо это склейка (DEDUP-001).
+_CLOSED_STATUSES = frozenset({TicketStatus.COMPLETED, TicketStatus.MERGED})
+
 
 class TicketError(Exception):
     """Базовая ошибка модуля заявок."""
@@ -60,6 +66,14 @@ class InvalidStatusTransition(TicketError):
 
 class TicketNotFound(TicketError):
     """Заявка не найдена или нет доступа — для вызывающего неотличимо."""
+
+
+class TicketClosed(TicketError):
+    """Закрытую или склеенную заявку переадресовывать некуда."""
+
+    def __init__(self, status: TicketStatus) -> None:
+        self.status = status
+        super().__init__(f"заявка в статусе {status.value} не переадресуется")
 
 
 async def create_ticket(
@@ -178,8 +192,16 @@ async def change_status(
     *,
     actor: str = "dispatcher",
     now: datetime | None = None,
+    settings: Settings | None = None,
 ) -> Ticket:
-    """Смена статуса + событие status_changed. Запрещённый переход — исключение."""
+    """Смена статуса + событие status_changed + уведомление подписчиков.
+
+    Всё тремя шагами в одной транзакции (STATUS-001): статус без уведомления
+    или уведомление без статуса — рассинхрон, который житель увидит. Коммитит
+    вызывающий, как и весь остальной код обработчиков (architecture.md §3).
+    Запрещённый переход — исключение до любой записи: ни события, ни
+    уведомления.
+    """
 
     now = now or datetime.now(UTC)
     if to_status is TicketStatus.MERGED:
@@ -202,6 +224,88 @@ async def change_status(
             payload=None,
             created_at=now,
         )
+    )
+    await notify_subscribers(
+        session,
+        ticket,
+        status_changed_notice(ticket.number, to_status),
+        settings=settings,
+    )
+    await session.flush()
+    return ticket
+
+
+async def reroute(
+    session: AsyncSession,
+    ticket: Ticket,
+    *,
+    zone: ResponsibilityZone,
+    org_id: uuid.UUID | None = None,
+    actor: str = "dispatcher",
+    reason: str | None = None,
+    now: datetime | None = None,
+    settings: Settings | None = None,
+) -> Ticket:
+    """Передача заявки другой организации: событие `routed` + уведомление.
+
+    Переадресация и статус — разные оси: «передано подрядчику» это статус
+    `routed_to_contractor`, а «передано в РСО» — смена адресата, поэтому
+    статус здесь не меняется (STATUS-001).
+    """
+
+    now = now or datetime.now(UTC)
+    if ticket.status in _CLOSED_STATUSES:
+        raise TicketClosed(ticket.status)
+    if zone in (ResponsibilityZone.OWNER, ResponsibilityZone.MUNICIPALITY):
+        msg = f"для зоны {zone.value} адресата не существует — переадресация невозможна"
+        raise TicketError(msg)
+
+    if org_id is not None:
+        new_type: ResponsibilityZone | None = zone
+        new_id: uuid.UUID | None = org_id
+        name, contact = await org_display(session, new_type, new_id)
+    else:
+        addressee = await resolve_addressee(
+            session, ticket.house_id, zone, ticket.problem_type, on=now
+        )
+        new_type, new_id = addressee.org_type, addressee.org_id
+        name, contact = addressee.name, addressee.contact
+
+    previous = {
+        "org_type": ticket.routed_to_org_type.value if ticket.routed_to_org_type else None,
+        "org_id": str(ticket.routed_to_org_id) if ticket.routed_to_org_id else None,
+    }
+    ticket.routed_to_org_type = new_type
+    ticket.routed_to_org_id = new_id
+    if zone is not ticket.responsibility_zone:
+        ticket.responsibility_zone = zone
+    ticket.updated_at = now
+
+    session.add(
+        TicketEvent(
+            id=uuid.uuid4(),
+            ticket_id=ticket.id,
+            event_type=TicketEventType.ROUTED.value,
+            from_status=ticket.status,
+            to_status=ticket.status,
+            actor=actor,
+            payload={
+                "from": previous,
+                "to": {
+                    "org_type": new_type.value if new_type else None,
+                    "org_id": str(new_id) if new_id else None,
+                    "name": name,
+                },
+                "reason": reason,
+            },
+            created_at=now,
+        )
+    )
+    await notify_subscribers(
+        session,
+        ticket,
+        rerouted_notice(ticket.number, name, contact),
+        settings=settings,
     )
     await session.flush()
     return ticket
@@ -246,6 +350,67 @@ async def list_for_user(
         .all()
     )
     return list(rows)
+
+
+def is_history_event(event: TicketEvent) -> bool:
+    """Что из ленты показывается жителю.
+
+    Служебное `routed` из `create_ticket` (ушли на УК, потому что РСО по
+    ресурсу не нашлась) в ленту не попадает: для жителя ничего никуда не
+    передавали. Отличается по ключу `to` — его пишет только `reroute`.
+    События о подписчиках показываются отдельной агрегированной строкой, без
+    имён и идентификаторов других жителей (architecture.md §11).
+    """
+
+    if event.event_type == TicketEventType.ROUTED.value:
+        return isinstance(event.payload, dict) and "to" in event.payload
+    return event.event_type in (
+        TicketEventType.CREATED.value,
+        TicketEventType.STATUS_CHANGED.value,
+    )
+
+
+async def list_history_events(
+    session: AsyncSession, ticket_id: uuid.UUID, *, limit: int = 5
+) -> list[TicketEvent]:
+    """Последние события заявки в хронологическом порядке (STATUS-001).
+
+    Отбор служебных событий делается в Python, а не в SQL: условие смотрит
+    внутрь JSON `payload`, а событий на заявку единицы — выборка дешевле
+    JSON-предиката в запросе.
+    """
+
+    rows = (
+        (
+            await session.execute(
+                select(TicketEvent)
+                .where(TicketEvent.ticket_id == ticket_id)
+                .order_by(TicketEvent.created_at, TicketEvent.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [event for event in rows if is_history_event(event)][-limit:]
+
+
+async def count_joined_subscribers(session: AsyncSession, ticket_id: uuid.UUID) -> int:
+    """Сколько жителей присоединилось к заявке помимо автора.
+
+    Считается по текущим подписчикам, а не по событиям `subscriber_joined`:
+    после выхода из склейки (DEDUP-001) число в ленте должно уменьшаться, а
+    события append-only.
+    """
+
+    found = await session.scalar(
+        select(func.count())
+        .select_from(TicketSubscriber)
+        .where(
+            TicketSubscriber.ticket_id == ticket_id,
+            TicketSubscriber.is_author.is_(False),
+        )
+    )
+    return int(found or 0)
 
 
 async def get_by_number(session: AsyncSession, number: int) -> Ticket | None:

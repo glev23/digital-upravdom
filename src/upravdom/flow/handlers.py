@@ -28,21 +28,25 @@ from upravdom.flow.callbacks import (
 from upravdom.models import (
     ClassificationLog,
     InboundEvent,
-    ManagementCompany,
     ProblemType,
-    ResourceOrganization,
+    Ticket,
+    TicketEvent,
 )
-from upravdom.models.enums import ResponsibilityZone
+from upravdom.models.enums import ResponsibilityZone, TicketEventType
 from upravdom.onboarding import service as onboarding_service
 from upravdom.onboarding.callbacks import inline_keyboard
 from upravdom.tickets import (
+    count_joined_subscribers,
     create_ticket,
     format_ticket_number,
     get_for_user,
     list_for_user,
+    list_history_events,
+    org_display,
     resolve_addressee,
     status_label,
 )
+from upravdom.tickets import texts as ticket_texts
 
 logger = logging.getLogger(__name__)
 
@@ -106,15 +110,53 @@ def _basis_line(result: ClassificationResult, norm_reference: str) -> str:
 async def _org_display(
     session: AsyncSession, org_type: ResponsibilityZone | None, org_id: uuid.UUID | None
 ) -> tuple[str | None, str | None]:
-    if org_id is None or org_type is None:
-        return None, None
-    if org_type is ResponsibilityZone.UK:
-        mc = await session.get(ManagementCompany, org_id)
-        return (mc.name, mc.ads_phone) if mc else (None, None)
-    if org_type is ResponsibilityZone.RSO:
-        ro = await session.get(ResourceOrganization, org_id)
-        return (ro.name, ro.contact) if ro else (None, None)
-    return None, None
+    # Разбор полиморфного адресата переехал в tickets.routing (STATUS-001):
+    # его же использует лента истории и уведомления подписчикам.
+    return await org_display(session, org_type, org_id)
+
+
+def _local_short(moment: datetime, tz_name: str) -> str:
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:  # noqa: BLE001
+        tz = ZoneInfo("Europe/Moscow")
+    return moment.astimezone(tz).strftime("%d.%m %H:%M")
+
+
+async def _history_event_text(session: AsyncSession, event: TicketEvent) -> str:
+    """Одна строка ленты. Для `routed` — название адресата из payload события,
+    а не текущее поле заявки: в истории должно остаться то, что было тогда."""
+
+    if event.event_type != TicketEventType.ROUTED.value:
+        return status_label(event.to_status)
+
+    target = event.payload.get("to") if isinstance(event.payload, dict) else None
+    if not isinstance(target, dict):
+        return ticket_texts.HISTORY_ROUTED_BARE
+    name = target.get("name")
+    if not name:
+        org_type = target.get("org_type")
+        org_id = target.get("org_id")
+        name, _contact = await org_display(
+            session,
+            ResponsibilityZone(org_type) if org_type else None,
+            uuid.UUID(str(org_id)) if org_id else None,
+        )
+    if not name:
+        return ticket_texts.HISTORY_ROUTED_BARE
+    return ticket_texts.HISTORY_ROUTED.format(org=name)
+
+
+async def _history_lines(session: AsyncSession, ticket: Ticket, tz_name: str) -> list[str]:
+    events = await list_history_events(session, ticket.id)
+    lines = [
+        f"• {_local_short(event.created_at, tz_name)} — {await _history_event_text(session, event)}"
+        for event in events
+    ]
+    joined = await count_joined_subscribers(session, ticket.id)
+    if joined:
+        lines.append(f"• {ticket_texts.joined_line(joined)}")
+    return [ticket_texts.HISTORY_HEADER, *lines] if lines else []
 
 
 def _status_keyboard(ticket_number: int | None = None) -> list[dict[str, object]]:
@@ -252,14 +294,12 @@ async def _handle_status(
         pt = await session.get(ProblemType, ticket.problem_type)
         norm = pt.norm_reference if pt else ""
         due = _format_due(ticket.due_at, norm, settings.display_timezone)
-        await _send(
-            session,
-            chat_id,
-            (
-                f"{format_ticket_number(ticket.number)} — {status_label(ticket.status)}. "
-                f"Адресат: {name or '—'}. {due}"
-            ),
+        head = (
+            f"{format_ticket_number(ticket.number)} — {status_label(ticket.status)}. "
+            f"Адресат: {name or '—'}. {due}"
         )
+        history = await _history_lines(session, ticket, settings.display_timezone)
+        await _send(session, chat_id, "\n".join([head, *history]))
         return
 
     tickets = await list_for_user(session, user_id, limit=5)

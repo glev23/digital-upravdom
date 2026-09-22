@@ -64,10 +64,27 @@ class MaxClient(Protocol):
     """Порт: всё, что нужно `outbox.py` от клиента MAX."""
 
     async def send_message(
-        self, *, chat_id: str, text: str, attachments: list[dict[str, object]] | None = None
+        self,
+        *,
+        chat_id: str | None = None,
+        user_id: str | None = None,
+        text: str,
+        attachments: list[dict[str, object]] | None = None,
     ) -> None: ...
 
     async def answer_callback(self, *, callback_id: str, notification: str) -> None: ...
+
+
+def _addressee_params(chat_id: str | None, user_id: str | None) -> dict[str, str]:
+    """`POST /messages` требует ровно один адресат — `chat_id` или `user_id`
+    (max_api.md §7). Уведомления подписчикам (STATUS-001, NOTIFY-001) идут по
+    `user_id`: в `users` хранится только `max_user_id`, а `chat_id` диалога с
+    ботом ему не равен и угадывать его нельзя."""
+
+    if (chat_id is None) == (user_id is None):
+        msg = "нужен ровно один адресат: chat_id или user_id"
+        raise ValueError(msg)
+    return {"chat_id": chat_id} if chat_id is not None else {"user_id": str(user_id)}
 
 
 class HttpxMaxClient:
@@ -88,12 +105,17 @@ class HttpxMaxClient:
         )
 
     async def send_message(
-        self, *, chat_id: str, text: str, attachments: list[dict[str, object]] | None = None
+        self,
+        *,
+        chat_id: str | None = None,
+        user_id: str | None = None,
+        text: str,
+        attachments: list[dict[str, object]] | None = None,
     ) -> None:
         body: dict[str, object] = {"text": text}
         if attachments:
             body["attachments"] = attachments
-        await self._post("/messages", params={"chat_id": chat_id}, body=body)
+        await self._post("/messages", params=_addressee_params(chat_id, user_id), body=body)
 
     async def answer_callback(self, *, callback_id: str, notification: str) -> None:
         """`POST /answers` (api-schema `answerOnCallback`, сверено 22.09.2026 в
@@ -130,7 +152,10 @@ class FakeMaxClient:
     """Для тестов: пишет в память, без сети, управляемо падает."""
 
     def __init__(self, *, fail_times: int = 0, permanent_failure: bool = False) -> None:
+        # `sent` — (адресат, текст); адресат — chat_id либо max_user_id.
+        # Каким именно способом адресовано, видно в `sent_user_ids` (STATUS-001).
         self.sent: list[tuple[str, str]] = []
+        self.sent_user_ids: list[str | None] = []
         self.sent_attachments: list[list[dict[str, object]] | None] = []
         self.answers: list[tuple[str, str]] = []
         self._fail_times = fail_times
@@ -145,10 +170,17 @@ class FakeMaxClient:
             raise MaxTransientError("fake transient failure")
 
     async def send_message(
-        self, *, chat_id: str, text: str, attachments: list[dict[str, object]] | None = None
+        self,
+        *,
+        chat_id: str | None = None,
+        user_id: str | None = None,
+        text: str,
+        attachments: list[dict[str, object]] | None = None,
     ) -> None:
+        params = _addressee_params(chat_id, user_id)
         self._maybe_fail()
-        self.sent.append((chat_id, text))
+        self.sent.append((next(iter(params.values())), text))
+        self.sent_user_ids.append(user_id)
         self.sent_attachments.append(attachments)
 
     async def answer_callback(self, *, callback_id: str, notification: str) -> None:

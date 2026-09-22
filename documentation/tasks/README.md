@@ -143,7 +143,7 @@
 | [DEDUP-001](./dedup-001.md) | `ready` |
 | [NOTIFY-001](./notify-001.md) | `ready` |
 | [RIGHTS-001](./rights-001.md) | `ready` |
-| [STATUS-001](./status-001.md) | `ready` |
+| [STATUS-001](./status-001.md) | `done` |
 
 Статусы в этой таблице справочные — канонические только в `progress_dev.md`.
 
