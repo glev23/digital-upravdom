@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+credentials/*
+!credentials/README.md
+
+# Node / web
+web/node_modules/
+web/dist/
+
+# Data / logs
+var/
+data/private/
+# Экспортированная ONNX-модель (490 МБ) — не коммитится, экспортируется
+# внутри Docker-сборки (docker/app.Dockerfile, стейдж exporter) или локально
+# `scripts/export_onnx.py` для дев-воркфлоу через venv.
+data/model/
+*.log
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

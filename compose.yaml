@@ -1,0 +1,71 @@
+# "docker compose up" поднимает app + postgres + qdrant одной командой и
+# приводит систему в рабочее состояние (architecture.md §12) — обязательное
+# требование формата сдачи кейса.
+#
+# Два адреса хранилищ для app и для локального venv-процесса объяснены в
+# architecture.md §12.1: сервис app получает DATABASE_URL/QDRANT_URL по
+# именам сервисов в этом файле явным `environment:`, который имеет приоритет
+# над `env_file:` — значения из .env для этих двух ключей на app не влияют.
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: upravdom
+      POSTGRES_PASSWORD: upravdom
+      POSTGRES_DB: upravdom
+    ports:
+      - "${POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U upravdom -d upravdom"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  qdrant:
+    # Тег зафиксирован: `latest` — плавающая версия, а клиент в pyproject.toml
+    # подбирает совместимый диапазон под конкретный сервер (иначе
+    # qdrant-client предупреждает о несовпадении major/minor).
+    image: qdrant/qdrant:v1.17.0
+    ports:
+      - "${QDRANT_PORT:-56333}:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test:
+        - "CMD"
+        - "bash"
+        - "-c"
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/6333 &&
+          printf 'GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          head -1 <&3 | grep -q '200 OK'
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    env_file:
+      - .env
+    environment:
+      # Переопределяют то, что задано в .env (см. architecture.md §12.1):
+      # app обращается к соседям по compose-сети по имени сервиса и
+      # внутреннему порту, а не через хостовые порты из .env.
+      DATABASE_URL: postgresql+asyncpg://upravdom:upravdom@postgres:5432/upravdom
+      QDRANT_URL: http://qdrant:6333
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  qdrant_data:

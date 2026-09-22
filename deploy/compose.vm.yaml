@@ -1,0 +1,80 @@
+# Деплой на пилотную/демо-VM — отдельно от корневого compose.yaml, который
+# должен остаться чистым артефактом сдачи (кейс требует ровно "docker
+# compose up" в корне репозитория, без флагов и посторонних сервисов).
+#
+# Отличия от корневого compose.yaml:
+# - Postgres и Qdrant НЕ публикуют портов на хост вообще (даже нестандартных)
+#   — на VM нет локального dev-воркфлоу через venv, публиковать нечего;
+# - app не публикует порт напрямую — единственная точка входа снаружи это
+#   Caddy на 80/443, который сам получает и продлевает сертификат Let's
+#   Encrypt (домен — DuckDNS, см. deploy/Caddyfile);
+# - у сервисов другие имена контейнеров (docker compose -p svc-app), чтобы
+#   не путать с другими проектами на той же общей машине.
+#
+# Запуск с этого каталога:
+#   docker compose -f deploy/compose.vm.yaml --env-file ../.env up -d --build
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: upravdom
+      POSTGRES_PASSWORD: upravdom
+      POSTGRES_DB: upravdom
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U upravdom -d upravdom"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:v1.17.0
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test:
+        - "CMD"
+        - "bash"
+        - "-c"
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/6333 &&
+          printf 'GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          head -1 <&3 | grep -q '200 OK'
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: ..
+      dockerfile: docker/app.Dockerfile
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://upravdom:upravdom@postgres:5432/upravdom
+      QDRANT_URL: http://qdrant:6333
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  caddy_data:
+  caddy_config:

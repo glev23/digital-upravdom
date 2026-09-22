@@ -1,0 +1,78 @@
+[project]
+name = "digital-upravdom"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic-settings>=2.6",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
+    # Верхняя граница держит клиент в пределах совместимости с сервером,
+    # закреплённым в compose.yaml (qdrant v1.17.0): major должен совпадать,
+    # minor — отличаться не больше чем на 1.
+    "qdrant-client>=1.12,<1.19",
+    "httpx>=0.27",
+    "apscheduler>=3.10",
+    # Эмбеддинги — ONNX Runtime без torch в рантайме (SPIKE-001, см. §2 architecture.md).
+    "onnxruntime>=1.30",
+    "tokenizers>=0.22",
+    "numpy>=2.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+]
+# Только для разового локального экспорта модели в ONNX (scripts/export_onnx.py).
+# Не в рантайм-образе. torch обязан быть прямой зависимостью группы, иначе
+# uv.lock тянет дефолтный PyPI-wheel с CUDA/nvidia/triton (~2+ ГБ) и
+# [tool.uv.sources] на транзитивный пакет не срабатывает в локе.
+embedding-export = [
+    "torch>=2.4",
+    "sentence-transformers>=3.2",
+    "optimum[onnxruntime]>=2.1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/upravdom"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+pythonpath = ["src", "."]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = "src"
+
+[[tool.mypy.overrides]]
+# Ни у onnxruntime, ни у tokenizers, ни у apscheduler нет type stubs / py.typed.
+module = ["onnxruntime", "tokenizers", "apscheduler.*"]
+ignore_missing_imports = true

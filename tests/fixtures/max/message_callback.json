@@ -1,0 +1,67 @@
+{
+  "callback": {
+    "timestamp": 1790043158594,
+    "callback_id": "f9LHodD0cOLEUIcgOMFjqW7PBmhKT1WtStUvRWlk4yZZ7j4tLXS0lQ9X8w_YkZZIZlDH_gLgrlb-VDjp4MR-UKncTwrwvIzYafDJ2XciS6pqqFKq2mXx",
+    "user": {
+      "user_id": 10000042,
+      "first_name": "Resident",
+      "last_name": "",
+      "is_bot": false,
+      "last_activity_time": 1790043157000,
+      "name": "Resident"
+    },
+    "payload": "onb:accept:t:9d7984baecef5909:1"
+  },
+  "timestamp": 1790043158594,
+  "message": {
+    "recipient": {
+      "chat_type": "dialog",
+      "chat_id": 20000777,
+      "user_id": 10000042
+    },
+    "timestamp": 1790043129089,
+    "body": {
+      "mid": "mid.0000000019d9227101a0c6e28501610d",
+      "seq": 117312266508001549,
+      "text": "Ваш дом: г. Казань, ул. Декабристов, д. 10\n\nЧтобы принимать обращения, мне нужно ваше согласие на обработку персональных данных.\n\nЧто обрабатывается: адрес вашего дома, ваш идентификатор в MAX и тексты ваших обращений.\nЗачем: чтобы определить, кто отвечает за проблему, оформить заявку и сообщать о её статусе и об отключениях в доме.\nПередача третьим лицам: для определения типа проблемы обезличенный фрагмент описания — без телефонов, имён и номеров квартир — передаётся внешнему сервису обработки текста.\nОтозвать согласие можно в любой момент командой /revoke.",
+      "attachments": [
+        {
+          "payload": {
+            "buttons": [
+              [
+                {
+                  "payload": "onb:accept:t:9d7984baecef5909:1",
+                  "text": "Согласен",
+                  "type": "callback"
+                },
+                {
+                  "payload": "onb:decline:t:9d7984baecef5909:1",
+                  "text": "Не согласен",
+                  "type": "callback"
+                }
+              ],
+              [
+                {
+                  "payload": "onb:wrong:t:9d7984baecef5909",
+                  "text": "Это не мой дом",
+                  "type": "callback"
+                }
+              ]
+            ]
+          },
+          "type": "inline_keyboard"
+        }
+      ]
+    },
+    "sender": {
+      "user_id": 426772098,
+      "first_name": "Хакатон МАХ 449",
+      "username": "t449_hakaton_max_bot",
+      "is_bot": true,
+      "last_activity_time": 1790043157920,
+      "name": "Хакатон МАХ 449"
+    }
+  },
+  "user_locale": "ru",
+  "update_type": "message_callback"
+}

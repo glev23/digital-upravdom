@@ -1,0 +1,8 @@
+# Текст хранится в репозитории с LF.
+* text=auto
+
+# Shell-скрипты выполняются в Linux-контейнере: с CRLF entrypoint.sh падает
+# («$'\r': command not found»), даже если checkout сделан на Windows.
+*.sh text eol=lf
+Caddyfile text eol=lf
+*.Dockerfile text eol=lf

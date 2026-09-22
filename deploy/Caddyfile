@@ -1,0 +1,6 @@
+# Caddy сам получает и продлевает сертификат Let's Encrypt (HTTP-01,
+# порт 80 свободен на VM — проверено при разведке).
+
+digital-upravdom.duckdns.org {
+	reverse_proxy app:8000
+}
