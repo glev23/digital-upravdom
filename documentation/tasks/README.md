@@ -142,7 +142,7 @@
 | [CLASSIFY-003](./classify-003.md) | `ready` |
 | [DEDUP-001](./dedup-001.md) | `done` |
 | [NOTIFY-001](./notify-001.md) | `done` |
-| [RIGHTS-001](./rights-001.md) | `ready` |
+| [RIGHTS-001](./rights-001.md) | `done` |
 | [STATUS-001](./status-001.md) | `done` |
 
 Статусы в этой таблице справочные — канонические только в `progress_dev.md`.

@@ -6,7 +6,7 @@ from __future__ import annotations
 from upravdom.models.base import Base
 from upravdom.models.knowledge import KnowledgeChunk, KnowledgeDocument
 from upravdom.models.notifications import Notification, NotificationDelivery
-from upravdom.models.observability import ClassificationLog
+from upravdom.models.observability import ClassificationLog, RightsLog
 from upravdom.models.organizations import (
     HouseResourceOrg,
     ManagementCompany,
@@ -38,4 +38,5 @@ __all__ = [
     "KnowledgeDocument",
     "KnowledgeChunk",
     "ClassificationLog",
+    "RightsLog",
 ]

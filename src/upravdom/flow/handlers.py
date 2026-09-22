@@ -33,9 +33,18 @@ from upravdom.models import (
     Ticket,
     TicketEvent,
 )
-from upravdom.models.enums import ResponsibilityZone, TicketEventType, TicketStatus
+from upravdom.models.enums import (
+    RefusalReason,
+    ResponsibilityZone,
+    TicketEventType,
+    TicketStatus,
+)
 from upravdom.onboarding import service as onboarding_service
 from upravdom.onboarding.callbacks import inline_keyboard
+from upravdom.rights import texts as rights_texts
+from upravdom.rights.detect import RightsQuestion
+from upravdom.rights.detect import detect as detect_rights
+from upravdom.rights.service import answer_question as answer_rights
 from upravdom.tickets import (
     count_joined_subscribers,
     create_merged_ticket,
@@ -422,6 +431,47 @@ async def _handle_status(
     await _send(session, chat_id, "\n".join(lines))
 
 
+async def _handle_rights(
+    session: AsyncSession,
+    event: ClaimedEvent,
+    *,
+    chat_id: str,
+    house_id: uuid.UUID,
+    question: RightsQuestion,
+    llm: LlmClient | None,
+    settings: Settings,
+) -> None:
+    """Справка по нормативам: подтверждение, ответ или честный отказ."""
+
+    if not question.text:
+        await _send(session, chat_id, rights_texts.HINT_NO_QUESTION)
+        return
+
+    # Своё подтверждение: «определяю, кто отвечает» на вопрос о правах неверно.
+    if event.attempts == 1:
+        await _send(session, chat_id, rights_texts.ACK_SEARCHING)
+        await session.commit()
+
+    addressee = await resolve_addressee(session, house_id, ResponsibilityZone.UK, "other")
+    contact = addressee.contact or rights_texts.NO_CONTACT
+
+    answer = await answer_rights(
+        question.text,
+        inbound_event_id=event.id,
+        session=session,
+        management_company_id=addressee.org_id,
+        llm=llm,
+        settings=settings,
+    )
+    if answer.refusal_reason in (RefusalReason.LLM_UNAVAILABLE, RefusalReason.KB_UNAVAILABLE):
+        await _send(session, chat_id, rights_texts.LLM_UNAVAILABLE.format(contact=contact))
+        return
+    if answer.refused:
+        await _send(session, chat_id, rights_texts.REFUSED.format(contact=contact))
+        return
+    await _send(session, chat_id, rights_texts.format_answer(answer.answer, answer.labels))
+
+
 async def on_message(
     session: AsyncSession,
     event: ClaimedEvent,
@@ -429,7 +479,7 @@ async def on_message(
     llm: LlmClient | None = None,
     settings: Settings | None = None,
 ) -> None:
-    """Содержательное сообщение: ack → статус-команда или classify → ответ."""
+    """Содержательное сообщение: статус-команда → вопрос о правах → ack → classify."""
 
     settings = settings or get_settings()
     parsed = parse_webhook_payload(event.payload)
@@ -455,6 +505,21 @@ async def on_message(
             chat_id=parsed.chat_id,
             user_id=user.id,
             number=num,
+            settings=settings,
+        )
+        return
+
+    # Вопрос о правах — до классификации (RIGHTS-001): это не жалоба, заявку
+    # заводить не нужно, и подтверждение у него своё.
+    question = detect_rights(raw)
+    if question is not None:
+        await _handle_rights(
+            session,
+            event,
+            chat_id=parsed.chat_id,
+            house_id=state.primary_house.id,
+            question=question,
+            llm=llm,
             settings=settings,
         )
         return

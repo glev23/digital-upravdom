@@ -130,6 +130,23 @@ class HouseRequestStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class RefusalReason(StrEnum):
+    """Почему бот не ответил на вопрос о правах (RIGHTS-001, §6.4).
+
+    Выдуманная норма в ответе хуже любого отказа: житель пойдёт с ней в УК
+    или ГЖИ. Поэтому причин отказа несколько, и все они записываются.
+    """
+
+    #: Модель сама сказала, что во фрагментах ответа нет.
+    INSUFFICIENT = "insufficient"
+    #: Не осталось ни одного подтверждённого фрагмента после сверки номеров.
+    NO_CITATIONS = "no_citations"
+    #: В тексте ответа норма, которую модели не показывали.
+    UNKNOWN_NORM_IN_ANSWER = "unknown_norm_in_answer"
+    LLM_UNAVAILABLE = "llm_unavailable"
+    KB_UNAVAILABLE = "kb_unavailable"
+
+
 class IndexState(StrEnum):
     """architecture.md §9 — состояние индексации чанка в Qdrant."""
 
