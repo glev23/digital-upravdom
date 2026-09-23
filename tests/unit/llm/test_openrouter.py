@@ -18,6 +18,7 @@ from upravdom.classifier.llm.port import (
     LlmRateLimited,
     LlmUnavailable,
 )
+from upravdom.classifier.schema import LlmClassification
 from upravdom.config import Settings
 
 
@@ -228,3 +229,45 @@ async def test_budget_at_most_two_timeouts() -> None:
     with pytest.raises(LlmUnavailable):
         await client.complete_json(MESSAGES, schema=_Tiny, timeout_s=8.0)
     assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_schema_sent_in_strict_form() -> None:
+    """Все поля обязательны и лишние запрещены (CLASSIFY-003).
+
+    Без этого pydantic оставлял `cited_fragments` вне `required`, и модель
+    законно не присылала основание решения — а без основания обращение не
+    маршрутизируется автоматически.
+    """
+
+    sent: dict[str, object] = {}
+
+    answer = json.dumps(
+        {
+            "problem_type": "elevator",
+            "responsibility_zone": "uk",
+            "confidence": 0.9,
+            "cited_fragments": [1],
+            "reasoning": "",
+            "clarifying_question": None,
+            "clarifying_options": [],
+        }
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.update(json.loads(request.content.decode()))
+        return httpx.Response(200, json=_ok_body(content=answer))
+
+    client = OpenRouterClient(settings=_settings(), transport=httpx.MockTransport(handler))
+    await client.complete_json(MESSAGES, schema=LlmClassification, timeout_s=8.0)
+
+    schema = cast(dict[str, object], sent["response_format"])
+    json_schema = cast(dict[str, object], schema["json_schema"])
+    body = cast(dict[str, object], json_schema["schema"])
+    assert json_schema["strict"] is True
+    assert body["additionalProperties"] is False
+    required = cast(list[str], body["required"])
+    assert set(required) == set(cast(dict[str, object], body["properties"]))
+    assert "cited_fragments" in required
+    defs = cast(dict[str, dict[str, object]], body["$defs"])
+    assert defs, "вложенные определения должны сохраниться"

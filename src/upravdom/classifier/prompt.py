@@ -15,7 +15,8 @@ from upravdom.masking import MaskedText
 from upravdom.models.enums import ResponsibilityZone
 
 # 2 — ссылки на фрагменты по номеру вместо строки ref.
-PROMPT_VERSION = "2"
+# 3 — cited_fragments обязателен в схеме (CLASSIFY-003) + образец ответа.
+PROMPT_VERSION = "3"
 
 # Сочинённые примеры. Помечены явно — не брать фразы из EVAL-001.
 _SYNTHETIC_FEW_SHOT: tuple[tuple[str, str], ...] = (
@@ -79,6 +80,14 @@ def build_messages(
 строго JSON по схеме. Не выдумывай пункты норм: в cited_fragments укажи
 номера [1..N] показанных фрагментов, на которые опирается решение.
 reasoning ≤ 300 символов, не цитируй обращение дословно.
+
+cited_fragments заполняй всегда, когда решение опирается хотя бы на один
+показанный фрагмент — без него заявка не будет направлена автоматически.
+Оставляй список пустым только если ни один фрагмент к обращению не относится:
+выдуманное основание хуже честного «не знаю». Образец заполненного ответа:
+{{"problem_type": "elevator", "responsibility_zone": "uk", "confidence": 0.9,
+"cited_fragments": [2], "reasoning": "лифт — общее имущество",
+"clarifying_question": null, "clarifying_options": []}}
 
 Допустимые problem_type: {codes}.
 

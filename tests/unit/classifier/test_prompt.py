@@ -40,7 +40,10 @@ def _types() -> list[ProblemTypeInfo]:
 
 
 def test_prompt_version_is_stable() -> None:
-    assert PROMPT_VERSION == "2"
+    # Бамп версии обязателен при правке промпта: она инвалидирует
+    # семантический кэш (§6.3). 3 — CLASSIFY-003, обязательный
+    # cited_fragments в схеме и образец заполненного ответа.
+    assert PROMPT_VERSION == "3"
 
 
 def test_build_messages_accepts_only_masked_text() -> None:

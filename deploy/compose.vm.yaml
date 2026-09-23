@@ -9,14 +9,18 @@
 #   Caddy на 80/443, который сам получает и продлевает сертификат Let's
 #   Encrypt (домен — DuckDNS, см. deploy/Caddyfile);
 # - у сервисов другие имена контейнеров (docker compose -p svc-app), чтобы
-#   не путать с другими проектами на той же общей машине.
+#   не путать с другими проектами на той же общей машине;
+# - restart: unless-stopped — после перезагрузки VM стек поднимается сам.
+#   Без этого 21–23.09.2026 бот 35 часов лежал после рестарта машины, и жюри
+#   увидело бы мёртвого бота.
 #
 # Запуск с этого каталога:
-#   docker compose -f deploy/compose.vm.yaml --env-file ../.env up -d --build
+#   docker compose -p svc-app -f deploy/compose.vm.yaml up -d --build
 
 services:
   postgres:
     image: postgres:16
+    restart: unless-stopped
     environment:
       POSTGRES_USER: upravdom
       POSTGRES_PASSWORD: upravdom
@@ -31,6 +35,7 @@ services:
 
   qdrant:
     image: qdrant/qdrant:v1.17.0
+    restart: unless-stopped
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:
@@ -47,6 +52,7 @@ services:
       retries: 10
 
   app:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: docker/app.Dockerfile
@@ -63,6 +69,7 @@ services:
 
   caddy:
     image: caddy:2-alpine
+    restart: unless-stopped
     ports:
       - "80:80"
       - "443:443"

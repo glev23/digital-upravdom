@@ -201,7 +201,7 @@ class OpenRouterClient:
                 "json_schema": {
                     "name": schema.__name__,
                     "strict": True,
-                    "schema": schema.model_json_schema(),
+                    "schema": _as_strict_schema(schema.model_json_schema()),
                 },
             },
         }
@@ -264,6 +264,36 @@ class OpenRouterClient:
             timeout_s,
         )
         return data, model_name, usage
+
+
+def _as_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Привести JSON-схему pydantic к строгому режиму провайдеров.
+
+    Pydantic кладёт в ``required`` только поля без значения по умолчанию,
+    поэтому ``cited_fragments`` — основание решения — формально оставался
+    необязательным, и модель законно его пропускала (CLASSIFY-003: на живом
+    прогоне поле чаще всего пустое, а без него правило «нет подтверждённой
+    нормы — нет авто-маршрутизации» отправляет обращение в «не уверен»).
+
+    Пустой список по-прежнему допустим: обязанность **назвать** основание не
+    должна превращаться в обязанность его выдумать, когда поиск не дал
+    ничего релевантного (тот же риск, что в §6.4 у справки о правах).
+    """
+
+    out = dict(schema)
+    for key in ("$defs", "definitions"):
+        defs = out.get(key)
+        if isinstance(defs, dict):
+            out[key] = {name: _as_strict_schema(sub) for name, sub in defs.items()}
+    properties = out.get("properties")
+    if isinstance(properties, dict):
+        out["properties"] = {name: _as_strict_schema(sub) for name, sub in properties.items()}
+        out["required"] = list(properties)
+        out["additionalProperties"] = False
+    items = out.get("items")
+    if isinstance(items, dict):
+        out["items"] = _as_strict_schema(items)
+    return out
 
 
 def _parse_json_content(content: str) -> Any:
