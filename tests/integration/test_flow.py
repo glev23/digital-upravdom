@@ -27,6 +27,7 @@ from upravdom.models import ClassificationLog, Ticket
 from upravdom.models.enums import ResponsibilityZone, TicketStatus
 from upravdom.onboarding import service as onboarding_service
 from upravdom.onboarding.handlers import gated
+from upravdom.tickets import format_ticket_number
 
 pytestmark = pytest.mark.asyncio
 
@@ -430,3 +431,86 @@ async def test_ticket_message_names_interruption_honestly(
     assert "ПП РФ №416, п. 13" in reply
     assert "Зона по умолчанию" not in reply
     assert "db-001" not in reply
+
+
+# --- QA-001: ошибочные действия жителя не оставляют тупиков ------------------
+
+
+async def _ticket_count(session: AsyncSession) -> int:
+    return int(await session.scalar(select(func.count()).select_from(Ticket)) or 0)
+
+
+@pytest.mark.parametrize(
+    "variant", ["статус {n}", "Статус №{n}", "статус заявки {n}", "/status {n}"]
+)
+async def test_status_free_form_is_command(
+    session: AsyncSession, onboarded: tuple[str, uuid.UUID], patch_search: None, variant: str
+) -> None:
+    user, _house = onboarded
+    await _deliver(
+        session, _message(user, "из стены сифонит"), _handler(FakeLlmClient(responses=[_llm()]))
+    )
+    ticket = (await session.execute(select(Ticket))).scalars().one()
+    before = await _ticket_count(session)
+
+    llm = FakeLlmClient(responses=[])
+    await _deliver(session, _message(user, variant.format(n=ticket.number)), _handler(llm))
+
+    assert llm.calls == []
+    assert await _ticket_count(session) == before
+    last = (await _outbox_texts(session, user))[-1]
+    assert last.startswith(format_ticket_number(ticket.number))
+
+
+async def test_status_without_number_lists_tickets(
+    session: AsyncSession, onboarded: tuple[str, uuid.UUID], patch_search: None
+) -> None:
+    user, _house = onboarded
+    llm = FakeLlmClient(responses=[])
+    await _deliver(session, _message(user, "статус N"), _handler(llm))
+    assert llm.calls == []
+    assert await _ticket_count(session) == 0
+    assert (await _outbox_texts(session, user))[-1] == texts.STATUS_EMPTY
+
+
+async def test_status_huge_number_is_not_found(
+    session: AsyncSession, onboarded: tuple[str, uuid.UUID], patch_search: None
+) -> None:
+    user, _house = onboarded
+    await _deliver(session, _message(user, "статус 99999999999999"), _handler(FakeLlmClient()))
+    assert (await _outbox_texts(session, user))[-1] == texts.STATUS_NOT_FOUND
+
+
+@pytest.mark.parametrize("phrase", ["помощь", "/help", "Привет!", "что ты умеешь?", "меню"])
+async def test_help_phrases_get_help_without_ticket(
+    session: AsyncSession, onboarded: tuple[str, uuid.UUID], patch_search: None, phrase: str
+) -> None:
+    user, _house = onboarded
+    llm = FakeLlmClient(responses=[])
+    await _deliver(session, _message(user, phrase), _handler(llm))
+    assert llm.calls == []
+    assert await _ticket_count(session) == 0
+    assert await _outbox_texts(session, user) == [texts.HELP]
+
+
+async def test_greeting_with_complaint_is_classified(
+    session: AsyncSession, onboarded: tuple[str, uuid.UUID], patch_search: None
+) -> None:
+    user, _house = onboarded
+    llm = FakeLlmClient(responses=[_llm()])
+    await _deliver(session, _message(user, "привет, течёт кран в подвале"), _handler(llm))
+    assert len(llm.calls) == 1
+    assert await _ticket_count(session) == 1
+
+
+async def test_non_text_message_gets_hint(
+    session: AsyncSession, onboarded: tuple[str, uuid.UUID], patch_search: None
+) -> None:
+    user, _house = onboarded
+    payload = _message(user, "")
+    del payload["message"]["body"]["text"]
+    payload["message"]["body"]["attachments"] = [{"type": "image", "payload": {"url": "x"}}]
+    llm = FakeLlmClient(responses=[])
+    await _deliver(session, payload, _handler(llm))
+    assert llm.calls == []
+    assert await _outbox_texts(session, user) == [texts.NON_TEXT]

@@ -64,8 +64,20 @@ from upravdom.tickets.due import format_due, local_short, norm_label
 
 logger = logging.getLogger(__name__)
 
+# Любое сообщение, начинающееся со слова статуса, — команда, а не жалоба:
+# «статус №6», «статус заявки 6» и «статус N» раньше уходили в классификацию и
+# создавали заявку диспетчеру (QA-001). Номер — первое число в хвосте; до 9
+# цифр, иначе переполнение integer в запросе уронило бы обработку события.
 _STATUS_CMD = re.compile(
-    r"^(?:/status|статус|моя\s+заявка)(?:\s+(\d+))?$",
+    r"^(?:/status|статусы?|моя\s+заявка|мои\s+заявки)\b(.*)$", re.IGNORECASE | re.DOTALL
+)
+_TICKET_NUMBER = re.compile(r"\d{1,9}")
+_HUGE_NUMBER = re.compile(r"\d{10,}")
+
+# Только всё сообщение целиком: «привет, течёт кран» — жалоба, её классифицируем.
+_HELP_CMD = re.compile(
+    r"^(?:/help|помощь|помоги(?:те)?|справка|меню|начать|привет|здравствуй(?:те)?"
+    r"|добрый\s+(?:день|вечер)|доброе\s+утро|что\s+(?:ты\s+)?умеешь)[\s!.?)]*$",
     re.IGNORECASE,
 )
 
@@ -503,13 +515,24 @@ async def on_message(
 
     raw = (parsed.text or "").strip()
     if not raw:
+        # Фото, голосовое, стикер: молчание выглядело бы как сбой бота.
+        await _send(session, parsed.chat_id, texts.NON_TEXT)
+        return
+
+    if _HELP_CMD.match(raw):
+        await _send(session, parsed.chat_id, texts.HELP)
         return
 
     # Команда статуса — до подтверждения: «Принял, определяю, кто отвечает» на
     # «статус» было бы неверно, это не жалоба.
     status_match = _STATUS_CMD.match(raw)
     if status_match:
-        num = int(status_match.group(1)) if status_match.group(1) else None
+        tail = status_match.group(1)
+        if _HUGE_NUMBER.search(tail):
+            await _send(session, parsed.chat_id, texts.STATUS_NOT_FOUND)
+            return
+        number_match = _TICKET_NUMBER.search(tail)
+        num = int(number_match.group()) if number_match else None
         await _handle_status(
             session,
             chat_id=parsed.chat_id,
