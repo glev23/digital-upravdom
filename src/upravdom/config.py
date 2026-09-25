@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     # 13.5 с, прежние 8 с обрывали больше половины вызовов. Верхняя граница —
     # окно видимости inbound (120 с): основная + резервная модель = 2×45 = 90 с.
     llm_timeout_seconds: float = Field(default=45.0, alias="LLM_TIMEOUT_SECONDS")
+    # Прокси только для вызовов OpenRouter: с IP пилотной VM (Yandex Cloud)
+    # openrouter.ai отвечает 403 «Access denied by security policy». Не
+    # глобальный HTTPS_PROXY — иначе через прокси пошли бы MAX API и
+    # внутренний http://qdrant:6333. Содержит пароль — секрет, как ключ.
+    llm_proxy: str | None = Field(default=None, alias="LLM_PROXY")
     llm_max_requests_per_minute: int = Field(default=15, alias="LLM_MAX_REQUESTS_PER_MINUTE")
     llm_circuit_failure_threshold: int = Field(default=3, alias="LLM_CIRCUIT_FAILURE_THRESHOLD")
     llm_circuit_open_seconds: float = Field(default=60.0, alias="LLM_CIRCUIT_OPEN_SECONDS")

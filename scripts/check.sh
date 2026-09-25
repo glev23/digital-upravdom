@@ -48,7 +48,7 @@ if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/n
     # добавится при `git add .` — но не игнорируемое. Проверка секретов
     # должна ловить утечку ДО первого коммита, а не только после `git add`.
     tracked_hits=$(git ls-files -z --cached --others --exclude-standard \
-        | xargs -0 grep -lE '^(MAX_BOT_TOKEN|MAX_WEBHOOK_SECRET|OPENROUTER_API_KEY)=.+' 2>/dev/null \
+        | xargs -0 grep -lE '^(MAX_BOT_TOKEN|MAX_WEBHOOK_SECRET|OPENROUTER_API_KEY|LLM_PROXY)=.+' 2>/dev/null \
         | grep -v '\.env\.example$' || true)
     if [ -n "$tracked_hits" ]; then
         fail "похоже на секрет в отслеживаемом файле: $tracked_hits"

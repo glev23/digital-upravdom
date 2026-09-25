@@ -271,3 +271,47 @@ async def test_schema_sent_in_strict_form() -> None:
     assert "cited_fragments" in required
     defs = cast(dict[str, dict[str, object]], body["$defs"])
     assert defs, "вложенные определения должны сохраниться"
+
+
+@pytest.mark.asyncio
+async def test_llm_proxy_applied_only_to_openrouter_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LLM_PROXY уходит в httpx-клиент OpenRouter — и больше никуда.
+
+    Глобальный HTTPS_PROXY отправил бы через прокси и MAX API, и внутренний
+    http://qdrant:6333; поэтому прокси — параметр именно этого клиента.
+    """
+
+    seen: dict[str, object] = {}
+    real_client = httpx.AsyncClient
+
+    def spy(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        seen.update(kwargs)
+        kwargs.pop("proxy", None)
+        kwargs["transport"] = httpx.MockTransport(
+            lambda _r: httpx.Response(200, json=_ok_body(content='{"label":"ok"}'))
+        )
+        return real_client(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(httpx, "AsyncClient", spy)
+    client = OpenRouterClient(settings=_settings(llm_proxy="http://u:secret@proxy.test:3128"))
+    await client.complete_json(MESSAGES, schema=_Tiny)
+    assert seen["proxy"] == "http://u:secret@proxy.test:3128"
+    assert "secret" not in repr(client)
+
+
+@pytest.mark.asyncio
+async def test_no_proxy_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+    real_client = httpx.AsyncClient
+
+    def spy(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        seen.update(kwargs)
+        kwargs["transport"] = httpx.MockTransport(
+            lambda _r: httpx.Response(200, json=_ok_body(content='{"label":"ok"}'))
+        )
+        return real_client(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(httpx, "AsyncClient", spy)
+    client = OpenRouterClient(settings=_settings())
+    await client.complete_json(MESSAGES, schema=_Tiny)
+    assert seen["proxy"] is None

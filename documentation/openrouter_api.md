@@ -150,6 +150,7 @@ ID с `pricing=0` и суффиксом `:free`, у которых в `supported
 | JSON | Всегда `temperature=0` + pydantic; `response_format.json_schema` со `strict: true` — схема приводится к строгому виду (`_as_strict_schema`: все поля в `required`, `additionalProperties: false`), см. §10 |
 | Нет ключа/модели | `LlmNotConfigured`, приложение стартует |
 | Повторы | Нет; только одна попытка резерва |
+| Прокси | `LLM_PROXY` — только для этого клиента (с IP пилотной VM openrouter.ai отвечает 403); MAX и Qdrant идут напрямую |
 | Таймаут | 45 с на вызов (было 8 с), основная + резерв ≤ 90 с — меньше окна видимости inbound 120 с |
 
 ---

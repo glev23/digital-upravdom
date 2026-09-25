@@ -206,8 +206,13 @@ class OpenRouterClient:
             },
         }
         timeout = httpx.Timeout(timeout_s, connect=_CONNECT_TIMEOUT_S)
+        # С явным transport (тесты) прокси не подключается: в httpx прокси —
+        # это mount, он перехватил бы запрос раньше подставленного transport.
+        proxy = self._settings.llm_proxy if self._transport is None else None
         try:
-            async with httpx.AsyncClient(transport=self._transport, timeout=timeout) as client:
+            async with httpx.AsyncClient(
+                transport=self._transport, timeout=timeout, proxy=proxy or None
+            ) as client:
                 response = await client.post(
                     self._base_url, headers=self._headers(api_key), json=body
                 )
