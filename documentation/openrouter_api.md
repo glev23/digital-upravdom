@@ -128,10 +128,10 @@ ID с `pricing=0` и суффиксом `:free`, у которых в `supported
 
 | ID | Заметки |
 |---|---|
-| `nex-agi/nex-n2.5-mini:free` | structured_outputs + response_format (основная до CLASSIFY-003) |
+| `nex-agi/nex-n2.5-mini:free` | structured_outputs + response_format — **резерв** с 25.09.2026 (§10) |
 | `liquid/lfm-2.5-2.6b:free` | structured_outputs + response_format (резерв до CLASSIFY-003) |
-| `nex-agi/nex-n2.5-pro:free` | structured_outputs — **основная** с CLASSIFY-003 (§10) |
-| `nvidia/nemotron-3-super-120b-a12b:free` | structured_outputs, рассуждающая — **резерв** с CLASSIFY-003 (§10) |
+| `nex-agi/nex-n2.5-pro:free` | structured_outputs (основная 23–25.09.2026; с 25.09 не отвечает — таймаут/503) |
+| `nvidia/nemotron-3-super-120b-a12b:free` | structured_outputs, рассуждающая — **основная** с 25.09.2026 (§10) |
 | `qwen/qwen3.8-27b:free` | structured_outputs |
 | `google/gemma-4-26b-a4b-it:free` | response_format |
 | `openrouter/free` | авто-роутер по бесплатным |
@@ -214,3 +214,6 @@ Pydantic кладёт в `required` только поля без значени�
 время ответил на все реальные обращения (лифт → `uk`, уверенность 0.95, два
 подтверждённых фрагмента). Замер 23.09 (таблица выше) сделан, пока Nex AGI
 отвечал; доступность провайдера оказалась важнее разницы в доле auto.
+В тот же день резерв сменён на `nex-agi/nex-n2.5-mini:free`: замер с прода
+(по 2 вызова без резерва) — Nemotron 1.2–1.6 с, mini 2.2 с, pro — таймаут
+и 503, Gemma и Qwen — 429 общего пула провайдера.
