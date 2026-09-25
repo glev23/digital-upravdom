@@ -26,6 +26,7 @@ from upravdom.flow.callbacks import (
     encode_none,
     encode_status,
 )
+from upravdom.knowledge.excerpt import match_position, norm_excerpt
 from upravdom.models import (
     ClassificationLog,
     InboundEvent,
@@ -85,11 +86,21 @@ async def _send(
 _ADS_DEADLINE_TYPES = frozenset({"cold_water", "hot_water", "sewage", "heating", "electricity"})
 
 
-def _basis_line(result: ClassificationResult, norm_reference: str) -> str:
+def _basis_line(
+    result: ClassificationResult, norm_reference: str, *, type_title: str, raw_text: str
+) -> str:
     if result.citations:
-        cite = result.citations[0]
-        snippet = " ".join(cite.body.split())[:120]
-        return f"Основание: {cite.label}" + (f" — {snippet}…" if snippet else "")
+        # Из подтверждённых фрагментов — тот, где нашлось слово типа проблемы
+        # или жалобы; иначе первый. Вырезка — окно вокруг совпадения.
+        cite = next(
+            (c for c in result.citations if match_position(c.body, type_title) is not None),
+            next(
+                (c for c in result.citations if match_position(c.body, raw_text) is not None),
+                result.citations[0],
+            ),
+        )
+        snippet = norm_excerpt(cite.body, type_title, raw_text)
+        return f"Основание: {cite.label}" + (f" — {snippet}" if snippet else "")
     # Без подтверждённого чанка — только сама норма из справочника, не текст модели.
     short = norm_label(norm_reference)
     return f"Основание: {short}" if short else "Основание: по справочнику типов проблем"
@@ -280,6 +291,8 @@ async def _respond_result(
 ) -> None:
     pt = await session.get(ProblemType, result.problem_type)
     norm_ref = pt.norm_reference if pt else ""
+    type_title = pt.title if pt else ""
+    basis = _basis_line(result, norm_ref, type_title=type_title, raw_text=raw_text)
     zone = result.responsibility_zone
 
     if result.branch is Branch.CLARIFY and result.log_id and result.clarifying_question:
@@ -296,17 +309,14 @@ async def _respond_result(
         addressee = await resolve_addressee(session, house_id, ResponsibilityZone.UK, "other")
         contact = addressee.contact or texts.NO_UK_CONTACT
         body = (
-            f"{texts.OWNER_INTRO}\n{_basis_line(result, norm_ref)}\n"
+            f"{texts.OWNER_INTRO}\n{basis}\n"
             f"Если нужна платная помощь или авария затрагивает соседей — АДС УК: {contact}."
         )
         await _send(session, chat_id, body)
         return
 
     if result.branch is Branch.AUTO and zone is ResponsibilityZone.MUNICIPALITY:
-        body = (
-            f"{texts.MUNICIPALITY_INTRO}\n{_basis_line(result, norm_ref)}\n"
-            f"{settings.fallback_contact_text}"
-        )
+        body = f"{texts.MUNICIPALITY_INTRO}\n{basis}\n{settings.fallback_contact_text}"
         await _send(session, chat_id, body)
         return
 
@@ -385,7 +395,7 @@ async def _respond_result(
     ]
     if create_zone is ResponsibilityZone.UK and result.problem_type in _ADS_DEADLINE_TYPES:
         lines.append(texts.ADS_DEADLINES)
-    lines.append(_basis_line(result, norm_ref))
+    lines.append(basis)
     body = "\n".join(lines)
     await _send(session, chat_id, body, _status_keyboard(ticket.number))
 

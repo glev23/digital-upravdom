@@ -213,9 +213,9 @@ OK. Детали — [status-001.md](./tasks/status-001.md).
 контракте: `cited_fragments` не входил в `required` схемы строгого режима,
 модель законно не присылала основание, и правило «нет нормы — нет auto»
 отправляло обращение в «не уверен». После `_as_strict_schema` на тех же 15
-фразах auto 80–85% вместо 27%. Основная модель — `nex-n2.5-pro:free`,
-резерв — `nemotron-3-super-120b:free` другого провайдера; таймаут LLM
-8 → 45 с. Открыт один критерий — стабильность 5×5 (замер упёрся в
+фразах auto 80–85% вместо 27%. Основная модель — `nemotron-3-super-120b:free`
+(с 25.09; до этого `nex-n2.5-pro`, чей провайдер перестал отвечать),
+резерв — `nex-n2.5-pro:free`; таймаут LLM 8 → 45 с. Открыт один критерий — стабильность 5×5 (замер упёрся в
 недоступность провайдера). Детали — [classify-003.md](./tasks/classify-003.md),
 `openrouter_api.md` §10.
 
@@ -272,7 +272,7 @@ KB-001 ✅, MASK-001 ✅, LLM-001 ✅. Что выяснилось при пос
 | 120 | [LLM-001](./tasks/llm-001.md) | `done` | INIT-001 | OpenRouter-адаптер; smoke `nex-agi/nex-n2.5-mini:free` |
 | 130 | [CLASSIFY-001](./tasks/classify-001.md) | `done` | KB-001, LLM-001, MASK-001 | `classify()` + журнал; demo auto=5/clarify=1/unknown=9; локально |
 | 140 | [CLASSIFY-002](./tasks/classify-002.md) | `done` | CLASSIFY-001 | semantic_cache + прототипы; `force_no_llm`; локально |
-| 145 | [CLASSIFY-003](./tasks/classify-003.md) | `in_progress` | CLASSIFY-001, CLASSIFY-002 | Строгая схема (`cited_fragments` обязателен) → auto 80–85% вместо 27%; модели pro + резерв NVIDIA; таймаут 45 с. Открыт один критерий — стабильность 5×5 |
+| 145 | [CLASSIFY-003](./tasks/classify-003.md) | `in_progress` | CLASSIFY-001, CLASSIFY-002 | Строгая схема (`cited_fragments` обязателен) → auto 80–85% вместо 27%; основная NVIDIA Nemotron, резерв nex-pro; таймаут 45 с. Открыт один критерий — стабильность 5×5 |
 | 150 | [TICKET-001](./tasks/ticket-001.md) | `done` | DB-001, DATA-001 | Короткий номер, адресат, due_at, статусы, доступ подписчику; локально |
 | 160 | [FLOW-001](./tasks/flow-001.md) | `done` | ONBOARD-001, CLASSIFY-001, TICKET-001 | Диалог в MAX: ack → classify → заявка/уточнение/статус; локально |
 
