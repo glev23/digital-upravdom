@@ -26,6 +26,8 @@ from upravdom.flow.callbacks import (
     encode_none,
     encode_status,
 )
+from upravdom.flow.intents import Intent
+from upravdom.flow.intents import detect as detect_intent
 from upravdom.knowledge.excerpt import match_position, norm_excerpt
 from upravdom.models import (
     ClassificationLog,
@@ -519,8 +521,25 @@ async def on_message(
         await _send(session, parsed.chat_id, texts.NON_TEXT)
         return
 
-    if _HELP_CMD.match(raw):
+    # Бытовой диалог — до классификации: «спасибо» не должно стоить вызова
+    # внешней модели и заявки диспетчеру (FLOW-002). Перехват срабатывает
+    # только на сообщении целиком, поэтому жалоба сюда не попадает.
+    intent = detect_intent(raw)
+    if intent is Intent.HELP or _HELP_CMD.match(raw):
         await _send(session, parsed.chat_id, texts.HELP)
+        return
+    if intent is Intent.HOUSE_INFO:
+        await _send(
+            session,
+            parsed.chat_id,
+            texts.HOUSE_INFO.format(address=state.primary_house.address),
+        )
+        return
+    if intent is Intent.SMALLTALK:
+        await _send(session, parsed.chat_id, texts.SMALLTALK)
+        return
+    if intent is Intent.JUNK:
+        await _send(session, parsed.chat_id, texts.JUNK)
         return
 
     # Команда статуса — до подтверждения: «Принял, определяю, кто отвечает» на

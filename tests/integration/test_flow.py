@@ -23,7 +23,7 @@ from upravdom.flow import texts
 from upravdom.flow.callbacks import encode_answer, encode_none, encode_status
 from upravdom.flow.handlers import on_callback, on_message
 from upravdom.knowledge.retrieval import RetrievedChunk
-from upravdom.models import ClassificationLog, Ticket
+from upravdom.models import ClassificationLog, House, Ticket
 from upravdom.models.enums import ResponsibilityZone, TicketStatus
 from upravdom.onboarding import service as onboarding_service
 from upravdom.onboarding.handlers import gated
@@ -514,3 +514,56 @@ async def test_non_text_message_gets_hint(
     await _deliver(session, payload, _handler(llm))
     assert llm.calls == []
     assert await _outbox_texts(session, user) == [texts.NON_TEXT]
+
+
+# --- FLOW-002: бытовой диалог не доходит до модели и не плодит заявки -------
+
+
+@pytest.mark.parametrize(
+    ("phrase", "expected"),
+    [
+        ("спасибо", texts.SMALLTALK),
+        ("ок", texts.SMALLTALK),
+        ("как пользоваться", texts.HELP),
+        (")))", texts.JUNK),
+    ],
+)
+async def test_smalltalk_costs_no_llm_call_and_no_ticket(
+    session: AsyncSession,
+    onboarded: tuple[str, uuid.UUID],
+    patch_search: None,
+    phrase: str,
+    expected: str,
+) -> None:
+    user, _house = onboarded
+    llm = FakeLlmClient(responses=[])
+    await _deliver(session, _message(user, phrase), _handler(llm))
+    assert llm.calls == [], "бытовая реплика не должна стоить вызова модели"
+    assert await _ticket_count(session) == 0
+    assert await _outbox_texts(session, user) == [expected]
+
+
+async def test_house_info_answers_with_bound_address(
+    session: AsyncSession, onboarded: tuple[str, uuid.UUID], patch_search: None
+) -> None:
+    user, house_id = onboarded
+    llm = FakeLlmClient(responses=[])
+    await _deliver(session, _message(user, "какой у меня дом"), _handler(llm))
+    assert llm.calls == []
+    house = await session.get(House, house_id)
+    assert house is not None
+    reply = (await _outbox_texts(session, user))[-1]
+    assert house.address_raw in reply
+    assert await _ticket_count(session) == 0
+
+
+async def test_complaint_with_greeting_still_creates_ticket(
+    session: AsyncSession, onboarded: tuple[str, uuid.UUID], patch_search: None
+) -> None:
+    """Главная защита: жалоба, начатая вежливостью, не должна стать болтовнёй."""
+
+    user, _house = onboarded
+    llm = FakeLlmClient(responses=[_llm()])
+    await _deliver(session, _message(user, "спасибо, но вода так и не идёт"), _handler(llm))
+    assert len(llm.calls) == 1
+    assert await _ticket_count(session) == 1
