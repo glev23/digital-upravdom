@@ -64,7 +64,13 @@ class Settings(BaseSettings):
     embedding_model_name: str = Field(default="sergeyzh/BERTA", alias="EMBEDDING_MODEL_NAME")
 
     # --- Пороги классификации (architecture.md §4) ----------------------------
-    classify_confidence_high: float = Field(default=0.75, alias="CLASSIFY_CONFIDENCE_HIGH")
+    # 0.60 (EVAL-002, 26.09.2026): самооценка модели не калибрована
+    # (CLASSIFY-003), а настоящая защита от выдуманной нормы — не число, а
+    # требование подтверждённой ссылки на фрагмент. На пороге 0.75 продукт
+    # молчал в 30% обращений, при этом ошибочные решения приходили с
+    # уверенностью 0.85–0.90 и порогом не отсекались. Подобрано на наборе
+    # EVAL-001 — том же, на котором меряется точность (architecture.md §13.2).
+    classify_confidence_high: float = Field(default=0.60, alias="CLASSIFY_CONFIDENCE_HIGH")
     classify_confidence_low: float = Field(default=0.45, alias="CLASSIFY_CONFIDENCE_LOW")
     semantic_cache_threshold: float = Field(default=0.92, alias="SEMANTIC_CACHE_THRESHOLD")
     # Часовой пояс дома для срока в ответах жителю (FLOW-001).

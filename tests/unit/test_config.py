@@ -26,7 +26,7 @@ def test_settings_load_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.max_bot_token is None
     assert settings.openrouter_api_key is None
     # значения по умолчанию из architecture.md §4, §6.2, §10, §11.1
-    assert settings.classify_confidence_high == 0.75
+    assert settings.classify_confidence_high == 0.60
     assert settings.classify_confidence_low == 0.45
     assert settings.semantic_cache_threshold == 0.92
     assert settings.consent_version == 1

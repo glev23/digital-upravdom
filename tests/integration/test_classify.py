@@ -266,7 +266,9 @@ async def test_clarification_second_pass_no_clarify_branch(
     llm = FakeLlmClient(
         responses=[
             _llm_ok(
-                confidence=0.6,
+                # В полосе уточнения (LOW..HIGH = 0.45..0.60): на втором проходе
+                # повторный вопрос запрещён, поэтому ветка UNKNOWN, а не CLARIFY.
+                confidence=0.5,
                 clarifying_question="Где течёт?",
                 clarifying_options=["В квартире", "На стояке"],
             )

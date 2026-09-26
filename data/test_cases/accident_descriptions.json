@@ -115,14 +115,15 @@
   {
     "id": "acc-010",
     "text": "Плановое отключение тянется с середины месяца, включили на полдня в субботу",
-    "expected_problem_type": "hot_water",
+    "expected_problem_type": "cold_water",
     "expected_zone": "uk",
     "norm_reference": "ПП РФ №491, п. 5",
     "source_kind": "news_comments",
     "source_url": "https://www.chita.ru/text/gorod/2026/08/31/76616487/comments/",
     "difficulty": "medium",
     "annotator": "assistant",
-    "is_test_data": true
+    "is_test_data": true,
+    "note": "Источник — публикация об отключении холодного водоснабжения; прежняя метка hot_water противоречила источнику (исправлено 26.09.2026)."
   },
   {
     "id": "acc-011",
@@ -310,7 +311,6 @@
     "annotator": "assistant",
     "is_test_data": true
   },
-
   {
     "id": "acc-026",
     "text": "Лопнул шланг на бачок унитаза, вода хлещет, соседей снизу уже заливаю",
@@ -426,25 +426,26 @@
   {
     "id": "acc-036",
     "text": "Тротуар за границей нашего двора весь разбит, ходить невозможно",
-    "expected_problem_type": "yard",
+    "expected_problem_type": "other",
     "expected_zone": "municipality",
     "norm_reference": "ПП РФ №491, п. 2",
     "source_kind": "synthetic",
     "difficulty": "medium",
     "annotator": "assistant",
     "is_test_data": true,
-    "note": "За границей земельного участка МКД общее имущество заканчивается."
+    "note": "Тротуар за границей участка МКД под определение yard («придомовая территория в границах земельного участка») не подпадает — тип other (исправлено 26.09.2026)."
   },
   {
     "id": "acc-037",
     "text": "Детская площадка через дорогу от дома сломана, она вроде городская",
-    "expected_problem_type": "yard",
+    "expected_problem_type": "other",
     "expected_zone": "municipality",
     "norm_reference": "ПП РФ №491, п. 2",
     "source_kind": "synthetic",
     "difficulty": "hard",
     "annotator": "assistant",
-    "is_test_data": true
+    "is_test_data": true,
+    "note": "Городской объект через дорогу — вне границ участка МКД, тип yard неприменим по определению справочника (исправлено 26.09.2026)."
   },
   {
     "id": "acc-038",

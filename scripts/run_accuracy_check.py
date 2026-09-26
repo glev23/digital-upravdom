@@ -102,6 +102,10 @@ class Outcome:
     # осторожности продукта. В основную таблицу не идёт.
     raw_type: str | None = None
     raw_zone: str | None = None
+    confidence: float = 0.0
+    # Без подтверждённой ссылки на норму auto невозможен ни при каком пороге
+    # (CLASSIFY-001 срезает уверенность ниже порога) — нужно для подбора порога.
+    cited: int = 0
 
 
 def load_cases() -> list[Case]:
@@ -201,6 +205,8 @@ async def run_classifier_mode(
                 abstained=abstained,
                 raw_type=result.problem_type,
                 raw_zone=result.responsibility_zone.value,
+                confidence=float(result.confidence),
+                cited=len(result.citations),
             )
         )
         print(f"    {case.id}: {result.problem_type}/{result.responsibility_zone.value}", flush=True)
@@ -254,7 +260,33 @@ def print_report(results: dict[str, list[Outcome]]) -> None:
     print(f"Для сравнения: классификатор «всегда УК» дал бы {_fmt(always_uk, total)} по зоне.")
 
 
-async def main_async(modes: Sequence[str], limit: int | None) -> int:
+def dump_outcomes(results: dict[str, list[Outcome]], path: Path) -> None:
+    payload = {
+        mode: [
+            {
+                "id": o.case.id,
+                "text": o.case.text,
+                "difficulty": o.case.difficulty,
+                "source_kind": o.case.source_kind,
+                "expected_type": o.case.expected_type,
+                "expected_zone": o.case.expected_zone,
+                "predicted_type": o.predicted_type,
+                "predicted_zone": o.predicted_zone,
+                "raw_type": o.raw_type,
+                "raw_zone": o.raw_zone,
+                "confidence": round(o.confidence, 3),
+                "cited": o.cited,
+                "abstained": o.abstained,
+            }
+            for o in outcomes
+        ]
+        for mode, outcomes in results.items()
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"подробности по каждому обращению: {path}")
+
+
+async def main_async(modes: Sequence[str], limit: int | None, dump: Path | None = None) -> int:
     from upravdom.classifier import service as classifier_service
 
     classifier_service.lookup_cache = _no_cache  # type: ignore[assignment]
@@ -289,6 +321,8 @@ async def main_async(modes: Sequence[str], limit: int | None) -> int:
                 )
 
     print_report(results)
+    if dump is not None:
+        dump_outcomes(results, dump)
     return 0
 
 
@@ -296,8 +330,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", action="append", choices=MODES, dest="modes")
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--dump", type=Path, default=None, help="результат по каждому обращению")
     args = parser.parse_args()
-    return asyncio.run(main_async(args.modes or list(MODES), args.limit))
+    return asyncio.run(main_async(args.modes or list(MODES), args.limit, args.dump))
 
 
 if __name__ == "__main__":
