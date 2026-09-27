@@ -316,6 +316,7 @@ async def classify(
             fallback_used=fallback_used,
             log_id=log_id,
             model_name=model_name,
+            off_topic=result.off_topic,
         )
 
     if not _has_meaningful_text(text):
@@ -477,6 +478,7 @@ async def classify(
         # модели — это всё ещё LLM; какая модель ответила, видно по model_name.
         fallback_used=False,
         model_name=llm_result.model_name,
+        off_topic=bool(data.off_topic),
     )
 
     # Кэш: только auto первого прохода основной модели.

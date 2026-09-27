@@ -334,6 +334,14 @@ async def _respond_result(
         await _send(session, chat_id, body)
         return
 
+    # Вопрос не про дом: заявку не создаём. Условие двойное — мало того, что
+    # модель пометила обращение посторонним, она ещё и не нашла ни одного
+    # жилищного типа. Расплывчатая жалоба про дом («что-то гудит по ночам»)
+    # даёт other, но off_topic = false, и заявка по ней создаётся (FLOW-003).
+    if result.off_topic and result.problem_type == "other" and result.branch is Branch.UNKNOWN:
+        await _send(session, chat_id, texts.OFF_TOPIC)
+        return
+
     # auto uk/rso, unknown, или clarify «не знаю» → заявка
     create_zone = zone
     if result.branch is Branch.UNKNOWN:

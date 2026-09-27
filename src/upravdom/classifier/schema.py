@@ -43,6 +43,17 @@ class LlmClassification(BaseModel):
         default_factory=list,
         description="номера показанных фрагментов [1..N], на которые опирается решение",
     )
+    # Отличает «вопрос не про дом» от «жалоба про дом, но непонятная»: по
+    # одной лишь уверенности они неразличимы — и «где купить танк», и «в доме
+    # что-то гудит по ночам» дают other с низким числом (FLOW-003).
+    off_topic: bool = Field(
+        default=False,
+        description=(
+            "true — обращение вообще не про дом, жильё или коммунальные услуги "
+            "(например, вопрос о погоде, арифметике или покупке вещей). "
+            "Непонятная или расплывчатая жалоба про дом — это false."
+        ),
+    )
     reasoning: str = Field(
         default="",
         max_length=300,
@@ -77,3 +88,5 @@ class ClassificationResult:
     fallback_used: bool = False
     log_id: uuid.UUID | None = None
     model_name: str | None = None
+    off_topic: bool = False
+    """Обращение не про дом: заявку создавать не нужно (FLOW-003)."""

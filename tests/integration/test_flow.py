@@ -142,12 +142,14 @@ def _llm(
     cited_fragments: list[int] | None = None,
     clarifying_question: str | None = None,
     clarifying_options: list[str] | None = None,
+    off_topic: bool = False,
 ) -> LlmClassification:
     return LlmClassification(
         problem_type=problem_type,
         responsibility_zone=zone,
         confidence=confidence,
         cited_fragments=cited_fragments or [1],
+        off_topic=off_topic,
         reasoning="тест",
         clarifying_question=clarifying_question,
         clarifying_options=clarifying_options or [],
@@ -566,4 +568,59 @@ async def test_complaint_with_greeting_still_creates_ticket(
     llm = FakeLlmClient(responses=[_llm()])
     await _deliver(session, _message(user, "спасибо, но вода так и не идёт"), _handler(llm))
     assert len(llm.calls) == 1
+    assert await _ticket_count(session) == 1
+
+
+# --- FLOW-003: вопрос не про дом не превращается в заявку ------------------
+
+
+async def test_off_topic_question_creates_no_ticket(
+    session: AsyncSession, onboarded: tuple[str, uuid.UUID], patch_search: None
+) -> None:
+    user, _house = onboarded
+    llm = FakeLlmClient(
+        responses=[
+            _llm(
+                problem_type="other",
+                zone=ResponsibilityZone.UNKNOWN,
+                confidence=0.1,
+                cited_fragments=[],
+                off_topic=True,
+            )
+        ]
+    )
+    await _deliver(session, _message(user, "где купить танк"), _handler(llm))
+    assert await _ticket_count(session) == 0
+    assert (await _outbox_texts(session, user))[-1] == texts.OFF_TOPIC
+
+
+async def test_vague_housing_complaint_still_creates_ticket(
+    session: AsyncSession, onboarded: tuple[str, uuid.UUID], patch_search: None
+) -> None:
+    """Опасное направление: расплывчатая жалоба про дом не должна стать отказом."""
+
+    user, _house = onboarded
+    llm = FakeLlmClient(
+        responses=[
+            _llm(
+                problem_type="other",
+                zone=ResponsibilityZone.UNKNOWN,
+                confidence=0.1,
+                cited_fragments=[],
+                off_topic=False,
+            )
+        ]
+    )
+    await _deliver(session, _message(user, "в доме что-то гудит по ночам"), _handler(llm))
+    assert await _ticket_count(session) == 1
+
+
+async def test_off_topic_flag_ignored_when_type_recognised(
+    session: AsyncSession, onboarded: tuple[str, uuid.UUID], patch_search: None
+) -> None:
+    """Если тип жилищный, ошибочному off_topic не верим — заявка создаётся."""
+
+    user, _house = onboarded
+    llm = FakeLlmClient(responses=[_llm(confidence=0.1, off_topic=True)])
+    await _deliver(session, _message(user, "нет холодной воды"), _handler(llm))
     assert await _ticket_count(session) == 1
