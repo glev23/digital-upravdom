@@ -93,3 +93,44 @@ async def test_company_filter_hides_other_uk_chunks(kb_loaded: AsyncQdrantClient
         client=client,
     )
     assert any(h.source_key == "uk_local" for h in hits_a)
+
+
+async def test_uk_document_visible_only_to_its_own_company(kb_loaded: AsyncQdrantClient) -> None:
+    """Документ УК из `data/kb/sources` виден только жителям её домов (KB-002).
+
+    Проверка на реальном артефакте, а не на подложенных точках: ошибка в
+    front-matter или в загрузчике иначе осталась бы незамеченной.
+    """
+
+    from scripts.seed_demo import stable_id
+
+    vahitovskaya = stable_id("mc:uk-vahitovskaya")
+    privolzhskaya = stable_id("mc:uk-privolzhskaya")
+    question = "за сколько часов приедет мастер после заявки об аварии"
+
+    own = await search(question, k=5, management_company_id=vahitovskaya, client=kb_loaded)
+    assert any(h.source_key == "uk_vahitovskaya" for h in own)
+    # Подпись, которую увидит житель, честно называет документ тестовым.
+    own_labels = [h.label for h in own if h.source_key == "uk_vahitovskaya"]
+    assert all("тестовый документ" in label for label in own_labels)
+
+    other = await search(question, k=5, management_company_id=privolzhskaya, client=kb_loaded)
+    assert all(h.source_key != "uk_vahitovskaya" for h in other)
+
+    # Без УК (дом без управляющей компании) — только федеральные нормы.
+    federal = await search(question, k=5, client=kb_loaded)
+    assert all(h.source_key != "uk_vahitovskaya" for h in federal)
+
+
+async def test_uk_document_does_not_displace_federal_norms(kb_loaded: AsyncQdrantClient) -> None:
+    """Слой УК — надстройка, а не замена: вопрос о нормативе остаётся у нормы."""
+
+    from scripts.seed_demo import stable_id
+
+    hits = await search(
+        "за сколько дней должны предупредить о плановом отключении воды",
+        k=5,
+        management_company_id=stable_id("mc:uk-vahitovskaya"),
+        client=kb_loaded,
+    )
+    assert hits[0].source_key == "pp354"

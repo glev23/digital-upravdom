@@ -45,6 +45,23 @@ SMALLTALK = [
     "пока",
     "до свидания",
 ]
+HOUSE_TICKETS = [
+    "что в доме",
+    "Что там в доме?",
+    "что происходит",
+    "что уже случилось в доме",
+    "какие заявки по дому",
+    "какие аварии в доме",
+    "что за проблемы в доме",
+    "обращения по дому",
+    "есть ли авария",
+    "есть заявки в доме",
+    "уже сообщали",
+    "об этом уже сообщали",
+    "история обращений",
+    "историю заявок",
+    "соседи уже жаловались",
+]
 JUNK = [")))", "?", "!!!", "12345", "—"]
 
 # Опасное направление: принять жалобу за болтовню значит потерять проблему
@@ -65,6 +82,13 @@ COMPLAINTS = [
     "какой дом обслуживает эту котельную, у нас холодно",
     "что в тебе сломалось",
     "что у тебя есть из документов по дому",
+    # Житель сообщает об аварии, а не спрашивает о ней: без вопросительной
+    # формы перехвата быть не должно (та же несимметричность, что в FLOW-002).
+    "авария в доме",
+    "в доме авария",
+    "заявки в доме нет а вода течёт",
+    "у нас в доме прорвало стояк",
+    "в доме нет воды",
 ]
 
 
@@ -81,6 +105,18 @@ def test_house_info(phrase: str) -> None:
 @pytest.mark.parametrize("phrase", SMALLTALK)
 def test_smalltalk(phrase: str) -> None:
     assert detect(phrase) is Intent.SMALLTALK
+
+
+@pytest.mark.parametrize("phrase", HOUSE_TICKETS)
+def test_house_tickets(phrase: str) -> None:
+    assert detect(phrase) is Intent.HOUSE_TICKETS
+
+
+@pytest.mark.parametrize("phrase", HOUSE)
+def test_house_info_not_shadowed_by_house_tickets(phrase: str) -> None:
+    """Вопрос про адрес и вопрос про обращения не путаются."""
+
+    assert detect(phrase) is Intent.HOUSE_INFO
 
 
 @pytest.mark.parametrize("phrase", JUNK)

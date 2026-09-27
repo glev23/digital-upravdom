@@ -144,6 +144,13 @@
 | [NOTIFY-001](./notify-001.md) | `done` |
 | [RIGHTS-001](./rights-001.md) | `done` |
 | [STATUS-001](./status-001.md) | `done` |
+| [QA-001](./qa-001.md) | `done` |
+| [EVAL-001](./eval-001.md) | `done` |
+| [EVAL-002](./eval-002.md) | `done` |
+| [FLOW-002](./flow-002.md) | `done` |
+| [FLOW-003](./flow-003.md) | `done` |
+| [FLOW-004](./flow-004.md) | `done` |
+| [KB-002](./kb-002.md) | `done` |
 
 Статусы в этой таблице справочные — канонические только в `progress_dev.md`.
 

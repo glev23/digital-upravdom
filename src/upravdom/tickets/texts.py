@@ -71,18 +71,28 @@ HISTORY_ROUTED = "передана: {org}"
 HISTORY_ROUTED_BARE = "передана другому адресату"
 
 
+def _residents(count: int) -> str:
+    tail = count % 100
+    if 11 <= tail <= 14:
+        return "жителей"
+    if count % 10 == 1:
+        return "житель"
+    if count % 10 in (2, 3, 4):
+        return "жителя"
+    return "жителей"
+
+
 def joined_line(count: int) -> str:
     """Присоединившиеся показываются числом: имена и идентификаторы других
     жителей в чужой ленте показывать нельзя (architecture.md §11)."""
 
     tail = count % 100
-    if 11 <= tail <= 14:
-        noun = "жителей"
-    elif count % 10 == 1:
-        noun = "житель"
-    elif count % 10 in (2, 3, 4):
-        noun = "жителя"
-    else:
-        noun = "жителей"
     verb = "присоединился" if count % 10 == 1 and tail != 11 else "присоединились"
-    return f"к заявке {verb} ещё {count} {noun}"
+    return f"к заявке {verb} ещё {count} {_residents(count)}"
+
+
+def house_joined_line(count: int) -> str:
+    """Та же мысль в списке по дому (FLOW-004): коротко и тоже только числом."""
+
+    verb = "сообщил" if count % 10 == 1 and count % 100 != 11 else "сообщили"
+    return f"о том же {verb} ещё {count} {_residents(count)}"

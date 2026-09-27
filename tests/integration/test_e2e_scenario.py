@@ -31,6 +31,7 @@ from upravdom.bot_gateway.inbox import ClaimedEvent
 from upravdom.bot_gateway.schemas import parse_webhook_payload
 from upravdom.classifier.llm.fake import FakeLlmClient
 from upravdom.classifier.schema import LlmClassification
+from upravdom.flow import texts as flow_texts
 from upravdom.knowledge.retrieval import RetrievedChunk
 from upravdom.models import Ticket, User
 from upravdom.models.enums import ResponsibilityZone, TicketStatus
@@ -241,7 +242,7 @@ async def test_full_scenario_twice_on_same_state(
 
     # Содержательная проверка первого прохода.
     joined = "\n".join(first_resident)
-    assert "Принял, определяю, кто отвечает" in joined
+    assert flow_texts.ACK_RECEIVED in joined
     assert re.search(r"Заявка № \d+ принята", joined)
     assert "Основание: ПП РФ №491, п. 5 абз. 1" in joined
     assert any("в работе" in t.lower() for t in first_resident), "нет уведомления о смене статуса"

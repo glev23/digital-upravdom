@@ -31,3 +31,6 @@ data/model/
 .DS_Store
 .idea/
 .vscode/
+
+# Claude Code: личные allow-правила, не в общий репозиторий
+.claude/settings.local.json

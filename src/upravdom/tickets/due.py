@@ -26,6 +26,27 @@ def norm_label(norm_reference: str) -> str:
     return match.group(0).strip() if match else ""
 
 
+_NUMBER = re.compile(r"\d+")
+
+
+def _norm_numbers(reference: str) -> tuple[int, ...]:
+    return tuple(int(n) for n in _NUMBER.findall(reference))
+
+
+def norm_matches(label: str, norm_reference: str) -> bool:
+    """Ссылка фрагмента и норма из справочника — про один и тот же пункт?
+
+    Сравнение по числам, а не по строкам: справочник пишет «ПП РФ №491, п.2»,
+    чанкер — «ПП РФ №491, п. 2», а более точная ссылка чанка («п. 2 абз. 1»)
+    считается совпадением с пунктом справочника.
+    """
+
+    target = _norm_numbers(norm_label(norm_reference))
+    if not target or not label:
+        return False
+    return _norm_numbers(label)[: len(target)] == target
+
+
 def display_zone(tz_name: str) -> ZoneInfo:
     try:
         return ZoneInfo(tz_name)

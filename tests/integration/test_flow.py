@@ -624,3 +624,89 @@ async def test_off_topic_flag_ignored_when_type_recognised(
     llm = FakeLlmClient(responses=[_llm(confidence=0.1, off_topic=True)])
     await _deliver(session, _message(user, "нет холодной воды"), _handler(llm))
     assert await _ticket_count(session) == 1
+
+
+async def test_house_tickets_list_shows_neighbour_without_text(
+    session: AsyncSession,
+    onboarded: tuple[str, uuid.UUID],
+    patch_search: None,
+) -> None:
+    """«Что в доме» — список по дому, а не по подписке (FLOW-004).
+
+    Житель должен увидеть, что об аварии уже сообщили, но не текст соседа.
+    """
+
+    from upravdom.bot_gateway.inbox import get_or_create_user
+
+    author, house_id = onboarded
+    complaint = "в подвале хлещет вода из трубы"
+    await _deliver(
+        session, _message(author, complaint), _handler(FakeLlmClient(responses=[_llm()]))
+    )
+    ticket = (await session.execute(select(Ticket))).scalars().one()
+
+    neighbour_key = f"neigh-{uuid.uuid4().hex[:6]}"
+    neighbour = await get_or_create_user(session, neighbour_key)
+    await onboarding_service.bind_house(session, neighbour.id, house_id)
+    await onboarding_service.grant_consent(
+        session, neighbour.id, version=get_settings().consent_version, source="test"
+    )
+    await _deliver(
+        session, _message(neighbour_key, "что в доме"), _handler(FakeLlmClient(responses=[]))
+    )
+
+    out = await _outbox_texts(session, neighbour_key)
+    listing = next(t for t in out if texts.HOUSE_TICKETS_PRIVACY in t)
+    assert format_ticket_number(ticket.number) in listing
+    assert "Отсутствие или перебои холодного водоснабжения" in listing
+    assert "принята" in listing
+    assert complaint not in listing, "текст обращения соседа показывать нельзя"
+    # Ни подтверждения приёма, ни заявки: это вопрос, а не обращение.
+    assert texts.ACK_RECEIVED not in out
+    assert (await session.scalar(select(func.count()).select_from(Ticket))) == 1
+
+
+async def test_house_tickets_list_empty_and_merged_hidden(
+    session: AsyncSession,
+    onboarded: tuple[str, uuid.UUID],
+    patch_search: None,
+) -> None:
+    user, _house = onboarded
+    await _deliver(session, _message(user, "что в доме"), _handler(FakeLlmClient(responses=[])))
+    assert any(texts.HOUSE_TICKETS_EMPTY in t for t in await _outbox_texts(session, user))
+
+    llm = FakeLlmClient(responses=[_llm(), _llm()])
+    await _deliver(session, _message(user, "нет холодной воды в стояке"), _handler(llm))
+    await _deliver(session, _message(user, "нет холодной воды в стояке"), _handler(llm))
+    merged = (
+        (await session.execute(select(Ticket).where(Ticket.status == TicketStatus.MERGED)))
+        .scalars()
+        .all()
+    )
+
+    await _deliver(session, _message(user, "что в доме"), _handler(FakeLlmClient(responses=[])))
+    listing = [t for t in await _outbox_texts(session, user) if texts.HOUSE_TICKETS_PRIVACY in t][
+        -1
+    ]
+    for dup in merged:
+        assert format_ticket_number(dup.number) not in listing, "склейка — не отдельное обращение"
+
+
+async def test_house_tickets_list_hides_internal_type_name(
+    session: AsyncSession,
+    onboarded: tuple[str, uuid.UUID],
+    patch_search: None,
+) -> None:
+    """Служебный `other` в списке — «Тип уточняется», а не название справочника."""
+
+    user, _house = onboarded
+    # Ветка «не уверен» сохраняет тип от модели: здесь она сама не определила его.
+    llm = FakeLlmClient(responses=[_llm(confidence=0.2, problem_type="other")])
+    await _deliver(session, _message(user, "что-то гудит по ночам непонятно где"), _handler(llm))
+    await _deliver(session, _message(user, "что в доме"), _handler(FakeLlmClient(responses=[])))
+
+    listing = [t for t in await _outbox_texts(session, user) if texts.HOUSE_TICKETS_PRIVACY in t][
+        -1
+    ]
+    assert texts.HOUSE_TICKETS_OTHER in listing
+    assert "не удалось классифицировать" not in listing

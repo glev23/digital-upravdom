@@ -55,6 +55,7 @@ from upravdom.tickets import (
     format_ticket_number,
     get_by_source_event,
     get_for_user,
+    list_for_house,
     list_for_user,
     list_history_events,
     org_display,
@@ -62,7 +63,7 @@ from upravdom.tickets import (
     status_label,
 )
 from upravdom.tickets import texts as ticket_texts
-from upravdom.tickets.due import format_due, local_short, norm_label
+from upravdom.tickets.due import format_due, local_short, norm_label, norm_matches
 
 logger = logging.getLogger(__name__)
 
@@ -99,20 +100,32 @@ async def _send(
 # Системы, для которых ПП №416 п. 13 задаёт сроки локализации/устранения аварии.
 _ADS_DEADLINE_TYPES = frozenset({"cold_water", "hot_water", "sewage", "heating", "electricity"})
 
+# Список по дому — короткий: он отвечает на «что уже происходит», а не заменяет
+# архив (FLOW-004).
+_HOUSE_TICKETS_LIMIT = 5
+
 
 def _basis_line(
     result: ClassificationResult, norm_reference: str, *, type_title: str, raw_text: str
 ) -> str:
     if result.citations:
-        # Из подтверждённых фрагментов — тот, где нашлось слово типа проблемы
-        # или жалобы; иначе первый. Вырезка — окно вокруг совпадения.
-        cite = next(
-            (c for c in result.citations if match_position(c.body, type_title) is not None),
+        # Из подтверждённых фрагментов — сначала тот, на который ссылается сам
+        # справочник типов проблем (он и объясняет зону: «кровля — общее
+        # имущество, ПП №491 п. 2»), затем фрагмент со словом типа проблемы или
+        # слова жалобы, иначе первый. Вырезка — окно вокруг совпадения.
+        preferred = (
+            next((c for c in result.citations if norm_matches(c.label, norm_reference)), None),
+            next(
+                (c for c in result.citations if match_position(c.body, type_title) is not None),
+                None,
+            ),
             next(
                 (c for c in result.citations if match_position(c.body, raw_text) is not None),
-                result.citations[0],
+                None,
             ),
+            result.citations[0],
         )
+        cite = next(c for c in preferred if c is not None)
         snippet = norm_excerpt(cite.body, type_title, raw_text)
         return f"Основание: {cite.label}" + (f" — {snippet}" if snippet else "")
     # Без подтверждённого чанка — только сама норма из справочника, не текст модели.
@@ -463,6 +476,42 @@ async def _handle_status(
     await _send(session, chat_id, "\n".join(lines))
 
 
+async def _handle_house_tickets(
+    session: AsyncSession,
+    *,
+    chat_id: str,
+    house: onboarding_service.HouseInfo,
+    settings: Settings,
+) -> None:
+    """Что уже происходит в доме (FLOW-004).
+
+    Заявку не создаёт и модель не вызывает: это вопрос, а не обращение. Смысл —
+    житель видит, что об аварии уже сообщили, до того как напишет о ней сам.
+    """
+
+    tickets = await list_for_house(session, house.id, limit=_HOUSE_TICKETS_LIMIT)
+    if not tickets:
+        await _send(session, chat_id, texts.HOUSE_TICKETS_EMPTY)
+        return
+
+    lines = [texts.HOUSE_TICKETS_HEADER.format(address=house.address)]
+    for ticket in tickets:
+        pt = await session.get(ProblemType, ticket.problem_type)
+        title = pt.title if pt else ticket.problem_type
+        if ticket.problem_type == "other":
+            title = texts.HOUSE_TICKETS_OTHER
+        when = local_short(ticket.created_at, settings.display_timezone)
+        lines.append(
+            f"• {format_ticket_number(ticket.number)} — {title}, "
+            f"{status_label(ticket.status)} ({when})"
+        )
+        joined = await count_joined_subscribers(session, ticket.id)
+        if joined:
+            lines.append(f"  {ticket_texts.house_joined_line(joined)}")
+    lines.append(texts.HOUSE_TICKETS_PRIVACY)
+    await _send(session, chat_id, "\n".join(lines))
+
+
 async def _handle_rights(
     session: AsyncSession,
     event: ClaimedEvent,
@@ -479,7 +528,8 @@ async def _handle_rights(
         await _send(session, chat_id, rights_texts.HINT_NO_QUESTION)
         return
 
-    # Своё подтверждение: «определяю, кто отвечает» на вопрос о правах неверно.
+    # Своё подтверждение: общее «обрабатываю» жителю ничего не говорит о поиске
+    # по нормативам, который занимает секунды.
     if event.attempts == 1:
         await _send(session, chat_id, rights_texts.ACK_SEARCHING)
         await session.commit()
@@ -543,6 +593,14 @@ async def on_message(
             texts.HOUSE_INFO.format(address=state.primary_house.address),
         )
         return
+    if intent is Intent.HOUSE_TICKETS:
+        await _handle_house_tickets(
+            session,
+            chat_id=parsed.chat_id,
+            house=state.primary_house,
+            settings=settings,
+        )
+        return
     if intent is Intent.SMALLTALK:
         await _send(session, parsed.chat_id, texts.SMALLTALK)
         return
@@ -550,8 +608,8 @@ async def on_message(
         await _send(session, parsed.chat_id, texts.JUNK)
         return
 
-    # Команда статуса — до подтверждения: «Принял, определяю, кто отвечает» на
-    # «статус» было бы неверно, это не жалоба.
+    # Команда статуса — до подтверждения: ACK_RECEIVED на «статус» было бы
+    # лишним сообщением, это не жалоба.
     status_match = _STATUS_CMD.match(raw)
     if status_match:
         tail = status_match.group(1)

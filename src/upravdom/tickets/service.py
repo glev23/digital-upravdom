@@ -539,6 +539,38 @@ async def list_for_user(
     return list(rows)
 
 
+async def list_for_house(
+    session: AsyncSession, house_id: uuid.UUID, *, limit: int = 5
+) -> list[Ticket]:
+    """Обращения по дому — открытые первыми, не больше limit (FLOW-004).
+
+    Доступ по дому, а не по подписке: житель видит, что об аварии уже
+    сообщили, и не создаёт дубль. Поэтому наружу отдаётся только тип, статус и
+    дата — текст чужого обращения жителю не показывается (architecture.md §11).
+    Склеенные дубли исключены: они и есть те же обращения, что головная заявка.
+    """
+
+    rows = (
+        (
+            await session.execute(
+                select(Ticket)
+                .where(
+                    Ticket.house_id == house_id,
+                    Ticket.status != TicketStatus.MERGED,
+                )
+                .order_by(
+                    Ticket.status.in_(_OPEN_STATUSES).desc(),
+                    Ticket.created_at.desc(),
+                )
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return list(rows)
+
+
 def is_history_event(event: TicketEvent) -> bool:
     """Что из ленты показывается жителю.
 
