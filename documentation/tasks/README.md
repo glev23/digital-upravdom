@@ -139,7 +139,7 @@
 | [CLASSIFY-002](./classify-002.md) | `done` |
 | [TICKET-001](./ticket-001.md) | `done` |
 | [FLOW-001](./flow-001.md) | `done` |
-| [CLASSIFY-003](./classify-003.md) | `ready` |
+| [CLASSIFY-003](./classify-003.md) | `done` |
 | [DEDUP-001](./dedup-001.md) | `done` |
 | [NOTIFY-001](./notify-001.md) | `done` |
 | [RIGHTS-001](./rights-001.md) | `done` |
@@ -151,6 +151,9 @@
 | [FLOW-003](./flow-003.md) | `done` |
 | [FLOW-004](./flow-004.md) | `done` |
 | [KB-002](./kb-002.md) | `done` |
+| [DOCS-002](./docs-002.md) | `done` |
+| [RESEARCH-001](./research-001.md) | `done` |
+| [SUBMIT-001](./submit-001.md) | `done` |
 
 Статусы в этой таблице справочные — канонические только в `progress_dev.md`.
 
