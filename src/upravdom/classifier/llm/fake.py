@@ -38,8 +38,9 @@ class FakeLlmClient:
         *,
         schema: type[BaseModel],
         timeout_s: float | None = None,
+        budget_s: float | None = None,
     ) -> LlmResult:
-        _ = schema, timeout_s
+        _ = schema, timeout_s, budget_s
         self.calls.append(messages)
         if not self._queue:
             raise LlmUnavailable("fake queue empty")

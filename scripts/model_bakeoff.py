@@ -46,16 +46,18 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-# Бесплатные модели известных вендоров, поддерживающие строгий JSON-schema
-# (сверено с GET /api/v1/models: supported_parameters). Текущая рабочая
-# nex-n2.5-mini оставлена последней как база для сравнения.
+# Текущая цепочка (LLM-002) плюс кандидаты, отвечавшие на отборе 28.09.2026.
+# Список `:free` меняется часто — перед прогоном сверять с
+# GET /api/v1/models (нужен `structured_outputs` или `response_format`).
+# Первая — основная, дальше порядок резервов из .env.example.
 DEFAULT_CANDIDATES: tuple[str, ...] = (
-    "qwen/qwen3.8-27b:free",
     "nvidia/nemotron-3-super-120b-a12b:free",
-    "google/gemma-4-31b-it:free",
-    "google/gemma-4-26b-a4b-it:free",
-    "nex-agi/nex-n2.5-pro:free",
-    "nex-agi/nex-n2.5-mini:free",
+    "poolside/laguna-s-2.1:free",
+    "dots-studio/dots-3-note-preview:free",
+    "liquid/lfm-2.5-2.6b:free",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "cohere/north-mini-code:free",
+    "qwen/qwen3.8-27b:free",
 )
 
 

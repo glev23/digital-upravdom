@@ -54,3 +54,34 @@ def test_settings_require_qdrant_url(monkeypatch: pytest.MonkeyPatch) -> None:
         Settings(_env_file=None)  # type: ignore[call-arg]
 
     assert "qdrant_url" in str(exc_info.value).lower()
+
+
+def test_model_chain_parses_list_and_drops_duplicates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OPENROUTER_MODEL_FALLBACK — список резервов через запятую (LLM-002)."""
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@localhost:55432/db")
+    monkeypatch.setenv("QDRANT_URL", "http://localhost:56333")
+    monkeypatch.setenv("OPENROUTER_MODEL", "vendor/primary:free")
+    monkeypatch.setenv(
+        "OPENROUTER_MODEL_FALLBACK",
+        " vendor/one:free , vendor/primary:free ,, vendor/two:free ",
+    )
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.llm_model_chain == (
+        "vendor/primary:free",
+        "vendor/one:free",
+        "vendor/two:free",
+    )
+
+
+def test_model_chain_without_fallbacks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@localhost:55432/db")
+    monkeypatch.setenv("QDRANT_URL", "http://localhost:56333")
+    monkeypatch.setenv("OPENROUTER_MODEL", "vendor/primary:free")
+    monkeypatch.delenv("OPENROUTER_MODEL_FALLBACK", raising=False)
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.llm_model_chain == ("vendor/primary:free",)

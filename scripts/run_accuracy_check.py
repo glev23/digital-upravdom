@@ -50,8 +50,11 @@ from upravdom.models import ProblemType
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-CASES = Path(__file__).resolve().parent.parent / "data" / "test_cases" / "accident_descriptions.json"
+CASES = (
+    Path(__file__).resolve().parent.parent / "data" / "test_cases" / "accident_descriptions.json"
+)
 MODES = ("menu", "keywords", "product", "no-llm")
+_NO_TICKET_INTENTS = frozenset({"house_tickets", "my_tickets", "rights", "consult"})
 
 # Рубрикатор: только прямое название категории, как в форме на портале.
 MENU_TERMS: dict[str, tuple[str, ...]] = {
@@ -106,6 +109,11 @@ class Outcome:
     # Без подтверждённой ссылки на норму auto невозможен ни при каком пороге
     # (CLASSIFY-001 срезает уверенность ниже порога) — нужно для подбора порога.
     cited: int = 0
+    # Каждое описание набора — настоящая проблема жителя. Роутинг по intent
+    # (FLOW-005, консультант) и отказ off_topic (FLOW-003) отвечают без
+    # заявки — здесь это ложный перехват жалобы. Верхняя оценка: консультант
+    # ещё может вернуть обращение в заявку (needs_ticket, отказ модели).
+    no_ticket: bool = False
 
 
 def load_cases() -> list[Case]:
@@ -207,9 +215,16 @@ async def run_classifier_mode(
                 raw_zone=result.responsibility_zone.value,
                 confidence=float(result.confidence),
                 cited=len(result.citations),
+                no_ticket=result.problem_type == "other"
+                and (
+                    result.intent.value in _NO_TICKET_INTENTS
+                    or (result.off_topic and result.branch is Branch.UNKNOWN)
+                ),
             )
         )
-        print(f"    {case.id}: {result.problem_type}/{result.responsibility_zone.value}", flush=True)
+        print(
+            f"    {case.id}: {result.problem_type}/{result.responsibility_zone.value}", flush=True
+        )
     return out
 
 
@@ -249,6 +264,9 @@ def print_report(results: dict[str, list[Outcome]]) -> None:
             print(row)
         abst, total = share(o.abstained for o in outcomes)
         print(f"{'':<10} {'без ответа жителю':<22}{_fmt(abst, total) + f' {abst}/{total}':>18}")
+        if mode in ("product", "no-llm"):
+            lost, total = share(o.no_ticket for o in outcomes)
+            print(f"{'':<10} {'жалоба без заявки':<22}{_fmt(lost, total) + f' {lost}/{total}':>18}")
         if any(o.raw_zone for o in outcomes):
             raw_hits, raw_total = share(o.raw_zone == o.case.expected_zone for o in outcomes)
             print(
@@ -277,6 +295,7 @@ def dump_outcomes(results: dict[str, list[Outcome]], path: Path) -> None:
                 "confidence": round(o.confidence, 3),
                 "cited": o.cited,
                 "abstained": o.abstained,
+                "no_ticket": o.no_ticket,
             }
             for o in outcomes
         ]
@@ -299,9 +318,7 @@ async def main_async(modes: Sequence[str], limit: int | None, dump: Path | None 
         await seed(session)
         house_id = stable_id("house:house-dekabristov-10")
         rows = (
-            await session.execute(
-                select(ProblemType.code, ProblemType.default_responsibility_zone)
-            )
+            await session.execute(select(ProblemType.code, ProblemType.default_responsibility_zone))
         ).all()
         defaults = {r.code: r.default_responsibility_zone.value for r in rows}
         if not defaults:

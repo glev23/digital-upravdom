@@ -44,7 +44,9 @@ def test_prompt_version_is_stable() -> None:
     # семантический кэш (§6.3). 3 — CLASSIFY-003, обязательный
     # cited_fragments в схеме и образец ответа. 4 — FLOW-003, признак
     # off_topic: вопрос не про дом отличается от непонятной жалобы.
-    assert PROMPT_VERSION == "4"
+    # 5 — FLOW-005, поле intent: житель спрашивает о доме, своих заявках или
+    # правах, а не сообщает о проблеме.
+    assert PROMPT_VERSION == "6"
 
 
 def test_build_messages_accepts_only_masked_text() -> None:

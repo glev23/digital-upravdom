@@ -1,6 +1,7 @@
 """Формат callback-кнопок основного сценария (FLOW-001).
 
-`clf:ans:<log_id>:<idx>` / `clf:none:<log_id>` / `clf:st` / `clf:st:<number>`
+`clf:ans:<log_id>:<idx>` / `clf:none:<log_id>` / `clf:st` / `clf:st:<number>` /
+`clf:norm:<chunk_id>`
 Текст вопроса в payload не кладётся — лимит кириллицы (урок ONBOARD-002).
 """
 
@@ -21,6 +22,7 @@ class FlowAction(StrEnum):
     ANSWER = "ans"
     NONE = "none"
     STATUS = "st"
+    NORM = "norm"
 
 
 @dataclass(slots=True, frozen=True)
@@ -29,6 +31,7 @@ class FlowCallback:
     log_id: uuid.UUID | None = None
     option_index: int | None = None
     ticket_number: int | None = None
+    chunk_id: uuid.UUID | None = None
 
 
 def encode_answer(log_id: uuid.UUID, option_index: int) -> str:
@@ -43,6 +46,16 @@ def encode_status(ticket_number: int | None = None) -> str:
     if ticket_number is None:
         return f"{PREFIX}:{FlowAction.STATUS.value}"
     return f"{PREFIX}:{FlowAction.STATUS.value}:{ticket_number}"
+
+
+def encode_norm(chunk_id: uuid.UUID) -> str:
+    """Кнопка «Показать норму»: в payload только id фрагмента.
+
+    Сам текст пункта в payload не кладётся — он до 2400 символов, а лимит
+    payload мал (урок ONBOARD-002 про кириллицу).
+    """
+
+    return f"{PREFIX}:{FlowAction.NORM.value}:{chunk_id}"
 
 
 def decode(payload: str | None) -> FlowCallback | None:
@@ -64,6 +77,11 @@ def decode(payload: str | None) -> FlowCallback | None:
         if len(parts) == 3 and parts[2].isdigit():
             return FlowCallback(action=action, ticket_number=int(parts[2]))
         return None
+
+    if action is FlowAction.NORM:
+        if len(parts) != 3 or not _UUID_RE.match(parts[2]):
+            return None
+        return FlowCallback(action=action, chunk_id=uuid.UUID(parts[2]))
 
     if len(parts) < 3 or not _UUID_RE.match(parts[2]):
         return None

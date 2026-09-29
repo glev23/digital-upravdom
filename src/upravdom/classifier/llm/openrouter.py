@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -29,6 +30,9 @@ logger = logging.getLogger(__name__)
 
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _CONNECT_TIMEOUT_S = 3.0
+# Меньше этого остатка бюджета пробовать следующую модель бессмысленно:
+# соединение и первый токен сами занимают несколько секунд.
+_MIN_ATTEMPT_S = 8.0
 _FENCE_RE = re.compile(r"^```(?:json)?\s*([\s\S]*?)\s*```$", re.IGNORECASE)
 
 
@@ -107,10 +111,7 @@ class OpenRouterClient:
         return breaker
 
     def __repr__(self) -> str:
-        return (
-            f"OpenRouterClient(model={self._settings.openrouter_model!r}, "
-            f"fallback={self._settings.openrouter_model_fallback!r})"
-        )
+        return f"OpenRouterClient(chain={list(self._settings.llm_model_chain)!r})"
 
     def _ensure_configured(self) -> tuple[str, str]:
         key = self._settings.openrouter_api_key
@@ -135,17 +136,16 @@ class OpenRouterClient:
         *,
         schema: type[BaseModel],
         timeout_s: float | None = None,
+        budget_s: float | None = None,
     ) -> LlmResult:
-        api_key, primary = self._ensure_configured()
+        api_key, _primary = self._ensure_configured()
         timeout_s = self._settings.llm_timeout_seconds if timeout_s is None else timeout_s
-        fallback = self._settings.openrouter_model_fallback
         now = self._time()
 
-        # Порядок попыток: основная, затем резервная — каждая только если её
-        # размыкатель закрыт. Открытый размыкатель основной = сразу резерв.
-        candidates = [(primary, False)]
-        if fallback and fallback != primary:
-            candidates.append((fallback, True))
+        # Порядок попыток: основная, затем резервы слева направо — каждая
+        # только если её размыкатель закрыт. Открытый размыкатель основной =
+        # сразу следующая модель.
+        candidates = [(m, i > 0) for i, m in enumerate(self._settings.llm_model_chain)]
         allowed = [(m, is_fb) for m, is_fb in candidates if self._breaker(m).allow(now=now)]
         if not allowed:
             raise LlmUnavailable("circuit breaker open")
@@ -154,11 +154,25 @@ class OpenRouterClient:
             raise LlmRateLimited("local LLM rate limit exceeded")
 
         t0 = self._time()
+        budget_s = self._settings.llm_total_budget_seconds if budget_s is None else budget_s
+        # Живой резерв отвечает за 5–15 с; мёртвый висит до конца таймаута.
+        # 29.09.2026 на проде три резерва подряд ждали по 45 с, и вопрос жителя
+        # ответа ждал 100 с — на консультанта бюджета уже не осталось.
+        fallback_timeout_s = min(timeout_s, self._settings.llm_fallback_timeout_seconds)
         last_exc: LlmError | None = None
-        for model, is_fallback in allowed:
+        for attempt, (model, is_fallback) in enumerate(allowed):
+            # Остаток общего бюджета: длинная цепочка не должна пережить окно
+            # видимости inbound — иначе сообщение уйдёт на повторную обработку,
+            # пока мы ещё опрашиваем резервы.
+            left_s = budget_s - (self._time() - t0)
+            if attempt and left_s < _MIN_ATTEMPT_S:
+                logger.info("LLM budget exhausted after %s attempts", attempt)
+                break
             if last_exc is not None:
                 logger.info(
-                    "LLM primary failed (%s), trying fallback model", type(last_exc).__name__
+                    "LLM model %s failed (%s), trying next in chain",
+                    allowed[attempt - 1][0],
+                    type(last_exc).__name__,
                 )
             try:
                 data, model_name, usage = await self._call(
@@ -166,7 +180,9 @@ class OpenRouterClient:
                     model=model,
                     messages=messages,
                     schema=schema,
-                    timeout_s=timeout_s,
+                    timeout_s=min(fallback_timeout_s, left_s)
+                    if attempt
+                    else min(timeout_s, left_s),
                 )
             except (LlmUnavailable, LlmRateLimited, LlmBadResponse) as exc:
                 self._breaker(model).record_failure(now=self._time())
@@ -213,10 +229,16 @@ class OpenRouterClient:
             async with httpx.AsyncClient(
                 transport=self._transport, timeout=timeout, proxy=proxy or None
             ) as client:
-                response = await client.post(
-                    self._base_url, headers=self._headers(api_key), json=body
+                # wait_for поверх таймаута httpx: read-таймаут отсчитывается
+                # заново на каждую порцию байт, а OpenRouter, пока ждёт
+                # провайдера, присылает keepalive-комментарии в тело. Без
+                # общего срока вызов к зависшей бесплатной модели живёт
+                # минутами и съедает бюджет всей цепочки (замер LLM-002).
+                response = await asyncio.wait_for(
+                    client.post(self._base_url, headers=self._headers(api_key), json=body),
+                    timeout=timeout_s,
                 )
-        except httpx.TimeoutException as exc:
+        except (httpx.TimeoutException, TimeoutError) as exc:
             raise LlmUnavailable("timeout") from exc
         except httpx.TransportError as exc:
             raise LlmUnavailable("network error") from exc

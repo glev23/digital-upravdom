@@ -46,11 +46,22 @@ class Settings(BaseSettings):
     # --- LLM (OpenRouter): пока необязательны (LLM-001) -----------------------
     openrouter_api_key: str | None = Field(default=None, alias="OPENROUTER_API_KEY")
     openrouter_model: str | None = Field(default=None, alias="OPENROUTER_MODEL")
+    # Список через запятую: резервов может быть несколько (LLM-002). Порядок
+    # значим — пробуются слева направо, первый ответивший выигрывает.
     openrouter_model_fallback: str | None = Field(default=None, alias="OPENROUTER_MODEL_FALLBACK")
     # 45 с (CLASSIFY-003): медиана ответа бесплатной модели на полном промпте
-    # 13.5 с, прежние 8 с обрывали больше половины вызовов. Верхняя граница —
-    # окно видимости inbound (120 с): основная + резервная модель = 2×45 = 90 с.
+    # 13.5 с, прежние 8 с обрывали больше половины вызовов.
     llm_timeout_seconds: float = Field(default=45.0, alias="LLM_TIMEOUT_SECONDS")
+    # Общий потолок на всю цепочку моделей. Раньше границу держал сам размер
+    # цепочки (2 × 45 с = 90 с < окна видимости inbound 120 с); с пятью
+    # резервами это правило исчезло, и без явного бюджета перебор пережил бы
+    # окно — сообщение вернулось бы в очередь и обработалось повторно.
+    # 100 с: запас 20 с на маскирование, поиск по KB, запись и отправку.
+    llm_total_budget_seconds: float = Field(default=100.0, alias="LLM_TOTAL_BUDGET_SECONDS")
+    # Срок одного вызова резервной модели. Замер с VM: живой резерв отвечает за
+    # 5–15 с, а мёртвый висит до таймаута — 45 с на резерв съедали весь бюджет
+    # за две-три модели, до остальных дело не доходило.
+    llm_fallback_timeout_seconds: float = Field(default=20.0, alias="LLM_FALLBACK_TIMEOUT_SECONDS")
     # Прокси только для вызовов OpenRouter: с IP пилотной VM (Yandex Cloud)
     # openrouter.ai отвечает 403 «Access denied by security policy». Не
     # глобальный HTTPS_PROXY — иначе через прокси пошли бы MAX API и
@@ -114,6 +125,22 @@ class Settings(BaseSettings):
     inbound_max_attempts: int = Field(default=5, alias="INBOUND_MAX_ATTEMPTS")
     outbound_max_attempts: int = Field(default=5, alias="OUTBOUND_MAX_ATTEMPTS")
     outbound_backoff_base_seconds: float = Field(default=2.0, alias="OUTBOUND_BACKOFF_BASE_SECONDS")
+
+    @property
+    def llm_model_chain(self) -> tuple[str, ...]:
+        """Основная модель и резервы в порядке перебора, без повторов.
+
+        Бесплатные модели OpenRouter пропадают из каталога без предупреждения
+        (так случилось с прежним единственным резервом), поэтому цепочка
+        задаётся списком, а не парой полей.
+        """
+
+        chain: list[str] = []
+        for raw in [self.openrouter_model, *(self.openrouter_model_fallback or "").split(",")]:
+            name = (raw or "").strip()
+            if name and name not in chain:
+                chain.append(name)
+        return tuple(chain)
 
 
 @lru_cache

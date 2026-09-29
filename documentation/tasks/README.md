@@ -147,12 +147,16 @@
 | [QA-001](./qa-001.md) | `done` |
 | [EVAL-001](./eval-001.md) | `done` |
 | [EVAL-002](./eval-002.md) | `done` |
+| [EVAL-003](./eval-003.md) | `done` |
 | [FLOW-002](./flow-002.md) | `done` |
 | [FLOW-003](./flow-003.md) | `done` |
 | [FLOW-004](./flow-004.md) | `done` |
+| [FLOW-005](./flow-005.md) | `done` |
+| [FLOW-006](./flow-006.md) | `done` |
 | [KB-002](./kb-002.md) | `done` |
 | [DOCS-002](./docs-002.md) | `done` |
 | [RESEARCH-001](./research-001.md) | `done` |
+| [LLM-002](./llm-002.md) | `done` |
 | [SUBMIT-001](./submit-001.md) | `done` |
 
 Статусы в этой таблице справочные — канонические только в `progress_dev.md`.

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 import uuid
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upravdom.bot_gateway import outbox
@@ -14,7 +15,10 @@ from upravdom.bot_gateway.inbox import ClaimedEvent, get_or_create_user
 from upravdom.bot_gateway.schemas import parse_webhook_payload
 from upravdom.classifier import Branch, Clarification, ClassificationResult, classify
 from upravdom.classifier.llm import LlmClient
+from upravdom.classifier.schema import Intent as LlmIntent
 from upravdom.config import Settings, get_settings
+from upravdom.consult import answer_consult
+from upravdom.consult import texts as consult_texts
 from upravdom.dedup import texts as dedup_texts
 from upravdom.dedup.callbacks import encode_split
 from upravdom.dedup.service import embed_message, find_candidate, subscribe_to_head
@@ -24,14 +28,18 @@ from upravdom.flow.callbacks import (
     decode,
     encode_answer,
     encode_none,
+    encode_norm,
     encode_status,
 )
 from upravdom.flow.intents import Intent
 from upravdom.flow.intents import detect as detect_intent
-from upravdom.knowledge.excerpt import match_position, norm_excerpt
+from upravdom.knowledge.excerpt import match_position, norm_quote
 from upravdom.models import (
     ClassificationLog,
+    House,
     InboundEvent,
+    KnowledgeChunk,
+    KnowledgeDocument,
     ProblemType,
     Ticket,
     TicketEvent,
@@ -103,16 +111,24 @@ _ADS_DEADLINE_TYPES = frozenset({"cold_water", "hot_water", "sewage", "heating",
 # Список по дому — короткий: он отвечает на «что уже происходит», а не заменяет
 # архив (FLOW-004).
 _HOUSE_TICKETS_LIMIT = 5
+# Запас окна видимости inbound на запись в базу и отправку ответа.
+_WINDOW_MARGIN_S = 15.0
+# Меньше этого консультанта не зовём: соединение и первый токен сами
+# занимают несколько секунд, а живой резерв отвечает за 5–15 с.
+_MIN_CONSULT_S = 20.0
 
 
 def _basis_line(
     result: ClassificationResult, norm_reference: str, *, type_title: str, raw_text: str
-) -> str:
+) -> tuple[str, uuid.UUID | None]:
+    """Строка основания и id пункта для кнопки «Показать норму»."""
+
     if result.citations:
         # Из подтверждённых фрагментов — сначала тот, на который ссылается сам
         # справочник типов проблем (он и объясняет зону: «кровля — общее
         # имущество, ПП №491 п. 2»), затем фрагмент со словом типа проблемы или
-        # слова жалобы, иначе первый. Вырезка — окно вокруг совпадения.
+        # слова жалобы, иначе первый. Показывается начало пункта — его предмет;
+        # полный текст житель открывает кнопкой.
         preferred = (
             next((c for c in result.citations if norm_matches(c.label, norm_reference)), None),
             next(
@@ -126,11 +142,13 @@ def _basis_line(
             result.citations[0],
         )
         cite = next(c for c in preferred if c is not None)
-        snippet = norm_excerpt(cite.body, type_title, raw_text)
-        return f"Основание: {cite.label}" + (f" — {snippet}" if snippet else "")
+        snippet = norm_quote(cite.body, type_title, raw_text)
+        line = f"Основание: {cite.label}" + (f" — {snippet}" if snippet else "")
+        return line, cite.chunk_id
     # Без подтверждённого чанка — только сама норма из справочника, не текст модели.
     short = norm_label(norm_reference)
-    return f"Основание: {short}" if short else "Основание: по справочнику типов проблем"
+    line = f"Основание: {short}" if short else "Основание: по справочнику типов проблем"
+    return line, None
 
 
 async def _org_display(
@@ -177,8 +195,23 @@ async def _history_lines(session: AsyncSession, ticket: Ticket, tz_name: str) ->
     return [ticket_texts.HISTORY_HEADER, *lines] if lines else []
 
 
-def _status_keyboard(ticket_number: int | None = None) -> list[dict[str, object]]:
-    return inline_keyboard([[(texts.BTN_STATUS, encode_status(ticket_number))]])
+def _status_keyboard(
+    ticket_number: int | None = None, *, chunk_id: uuid.UUID | None = None
+) -> list[dict[str, object]]:
+    rows = [[(texts.BTN_STATUS, encode_status(ticket_number))]]
+    if chunk_id is not None:
+        # Полный текст пункта — по запросу, а не в каждом сообщении: пункт
+        # бывает до 2400 символов и в чате читается как стена (UX, 29.09.2026).
+        rows.append([(texts.BTN_NORM, encode_norm(chunk_id))])
+    return inline_keyboard(rows)
+
+
+def _norm_keyboard(chunk_id: uuid.UUID | None) -> list[dict[str, object]] | None:
+    """Только «Показать норму» — в ответах без заявки (собственник, город)."""
+
+    if chunk_id is None:
+        return None
+    return inline_keyboard([[(texts.BTN_NORM, encode_norm(chunk_id))]])
 
 
 def _clarify_keyboard(log_id: uuid.UUID, options: list[str]) -> list[dict[str, object]]:
@@ -319,7 +352,7 @@ async def _respond_result(
     pt = await session.get(ProblemType, result.problem_type)
     norm_ref = pt.norm_reference if pt else ""
     type_title = pt.title if pt else ""
-    basis = _basis_line(result, norm_ref, type_title=type_title, raw_text=raw_text)
+    basis, basis_chunk_id = _basis_line(result, norm_ref, type_title=type_title, raw_text=raw_text)
     zone = result.responsibility_zone
 
     if result.branch is Branch.CLARIFY and result.log_id and result.clarifying_question:
@@ -339,12 +372,12 @@ async def _respond_result(
             f"{texts.OWNER_INTRO}\n{basis}\n"
             f"Если нужна платная помощь или авария затрагивает соседей — АДС УК: {contact}."
         )
-        await _send(session, chat_id, body)
+        await _send(session, chat_id, body, _norm_keyboard(basis_chunk_id))
         return
 
     if result.branch is Branch.AUTO and zone is ResponsibilityZone.MUNICIPALITY:
         body = f"{texts.MUNICIPALITY_INTRO}\n{basis}\n{settings.fallback_contact_text}"
-        await _send(session, chat_id, body)
+        await _send(session, chat_id, body, _norm_keyboard(basis_chunk_id))
         return
 
     # Вопрос не про дом: заявку не создаём. Условие двойное — мало того, что
@@ -432,7 +465,7 @@ async def _respond_result(
         lines.append(texts.ADS_DEADLINES)
     lines.append(basis)
     body = "\n".join(lines)
-    await _send(session, chat_id, body, _status_keyboard(ticket.number))
+    await _send(session, chat_id, body, _status_keyboard(ticket.number, chunk_id=basis_chunk_id))
 
 
 async def _handle_status(
@@ -554,6 +587,112 @@ async def _handle_rights(
     await _send(session, chat_id, rights_texts.format_answer(answer.answer, answer.labels))
 
 
+async def _route_by_intent(
+    session: AsyncSession,
+    event: ClaimedEvent,
+    *,
+    chat_id: str,
+    user_id: uuid.UUID,
+    house: onboarding_service.HouseInfo,
+    raw: str,
+    result: ClassificationResult,
+    llm: LlmClient | None,
+    settings: Settings,
+    elapsed_s: float = 0.0,
+) -> bool:
+    """True — сообщение обработано как вопрос, заявку создавать не нужно.
+
+    Условие несимметричное, как у `off_topic` в FLOW-003: намерение
+    принимается только вместе с `problem_type == "other"`. Иначе «какие
+    заявки в доме, у меня опять течёт» осталось бы без заявки, а потерять
+    жалобу дороже, чем не распознать вопрос.
+    """
+
+    if result.problem_type != "other" or result.intent is LlmIntent.COMPLAINT:
+        return False
+
+    if result.intent is LlmIntent.HOUSE_TICKETS:
+        await _handle_house_tickets(session, chat_id=chat_id, house=house, settings=settings)
+        return True
+
+    if result.intent is LlmIntent.MY_TICKETS:
+        await _handle_status(
+            session, chat_id=chat_id, user_id=user_id, number=None, settings=settings
+        )
+        return True
+
+    if result.intent is LlmIntent.RIGHTS:
+        # Второй вызов модели — только для этой ветки: справка ищет ответ по
+        # нормативам, а классификация этого не делает.
+        await _handle_rights(
+            session,
+            event,
+            chat_id=chat_id,
+            house_id=house.id,
+            question=RightsQuestion(text=raw, from_command=False),
+            llm=llm,
+            settings=settings,
+        )
+        return True
+
+    if result.intent is LlmIntent.CONSULT:
+        # Шум, соседи, чужие животные: заявка УК тут ничего не решит. Второй
+        # вызов модели — как у справки, только для этой ветки. Отказ
+        # консультанта — обычная заявка: обращение не теряется.
+        # Второй вызов укладывается в окно видимости вместе с классификацией:
+        # 29.09.2026 классификация на висящих резервах заняла 100 с, и
+        # консультант, получив свой полный бюджет, пережил бы окно — сообщение
+        # обработалось бы второй раз. Не хватает времени — обычная заявка.
+        budget_s = settings.inbound_visibility_timeout_seconds - _WINDOW_MARGIN_S - elapsed_s
+        if budget_s < _MIN_CONSULT_S:
+            logger.info("consult: нет времени (%.0f с на классификацию) — заявка", elapsed_s)
+            return False
+        return await _handle_consult(
+            session,
+            event,
+            chat_id=chat_id,
+            house_id=house.id,
+            raw=raw,
+            llm=llm,
+            settings=settings,
+            budget_s=min(budget_s, settings.llm_total_budget_seconds),
+        )
+
+    return False
+
+
+async def _handle_consult(
+    session: AsyncSession,
+    event: ClaimedEvent,
+    *,
+    chat_id: str,
+    house_id: uuid.UUID,
+    raw: str,
+    llm: LlmClient | None,
+    settings: Settings,
+    budget_s: float | None = None,
+) -> bool:
+    company_id = await session.scalar(
+        select(House.management_company_id).where(House.id == house_id)
+    )
+    consult = await answer_consult(
+        raw,
+        inbound_event_id=event.id,
+        management_company_id=company_id,
+        llm=llm,
+        settings=settings,
+        budget_s=budget_s,
+    )
+    if not consult.ok:
+        return False
+    lines = [consult.answer]
+    if consult.citations:
+        lines.append("Основание: " + "; ".join(c.label for c in consult.citations))
+    lines.append(consult_texts.FOOTER)
+    await _send(session, chat_id, "\n\n".join(lines))
+    return True
+
+
 async def on_message(
     session: AsyncSession,
     event: ClaimedEvent,
@@ -647,6 +786,7 @@ async def on_message(
         await _send(session, parsed.chat_id, texts.ACK_RECEIVED)
         await session.commit()
 
+    classify_started = time.monotonic()
     result = await classify(
         raw,
         house_id=state.primary_house.id,
@@ -655,6 +795,25 @@ async def on_message(
         llm=llm,
         settings=settings,
     )
+
+    # Шаблонный слой закрытый: «какие заявки в доме» он ловит, «какие заявки
+    # ещё есть в доме» — уже нет, и такое сообщение уходило в заявку
+    # диспетчеру (живой прогон 28.09.2026). Роутинг добирает модель, которую
+    # мы уже вызвали, — дополнительного вызова здесь нет (FLOW-005).
+    if await _route_by_intent(
+        session,
+        event,
+        chat_id=parsed.chat_id,
+        user_id=user.id,
+        house=state.primary_house,
+        raw=raw,
+        result=result,
+        llm=llm,
+        settings=settings,
+        elapsed_s=time.monotonic() - classify_started,
+    ):
+        return
+
     await _respond_result(
         session,
         chat_id=parsed.chat_id,
@@ -665,6 +824,47 @@ async def on_message(
         result=result,
         settings=settings,
     )
+
+
+async def _handle_norm(
+    session: AsyncSession,
+    *,
+    chat_id: str,
+    user_id: uuid.UUID,
+    chunk_id: uuid.UUID | None,
+    settings: Settings,
+) -> None:
+    """Полный текст пункта по кнопке «Показать норму».
+
+    id фрагмента приходит из payload кнопки, а payload житель может подменить.
+    Нормативы публичны, но документ конкретной УК (KB-002) — нет: житель другой
+    УК его не видит и в поиске, значит не должен получить и по подобранному id.
+    """
+
+    chunk = await session.get(KnowledgeChunk, chunk_id) if chunk_id else None
+    doc = await session.get(KnowledgeDocument, chunk.document_id) if chunk else None
+    if chunk is None or doc is None:
+        await _send(session, chat_id, texts.NORM_NOT_FOUND)
+        return
+    if doc.management_company_id is not None:
+        state = await onboarding_service.get_state(session, user_id, settings.consent_version)
+        house = state.primary_house
+        company_id = (
+            await session.scalar(select(House.management_company_id).where(House.id == house.id))
+            if house is not None
+            else None
+        )
+        if company_id != doc.management_company_id:
+            logger.warning("norm callback: документ чужой УК")
+            await _send(session, chat_id, texts.NORM_NOT_FOUND)
+            return
+
+    label, _, body = chunk.chunk_text.partition("\n")
+    full = f"{label.strip()}\n\n{' '.join(body.split()) or label.strip()}"
+    if len(full) > texts.NORM_FULL_MAX:
+        cut = full.rfind(" ", 0, texts.NORM_FULL_MAX)
+        full = full[: cut if cut > 0 else texts.NORM_FULL_MAX] + "…"
+    await _send(session, chat_id, full)
 
 
 async def _original_text(session: AsyncSession, inbound_event_id: uuid.UUID) -> str | None:
@@ -699,6 +899,16 @@ async def on_callback(
         return
 
     user = await get_or_create_user(session, parsed.max_user_id)
+
+    if cb.action is FlowAction.NORM:
+        await _handle_norm(
+            session,
+            chat_id=parsed.chat_id,
+            user_id=user.id,
+            chunk_id=cb.chunk_id,
+            settings=settings,
+        )
+        return
 
     if cb.action is FlowAction.STATUS:
         await _handle_status(

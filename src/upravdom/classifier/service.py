@@ -317,6 +317,7 @@ async def classify(
             log_id=log_id,
             model_name=model_name,
             off_topic=result.off_topic,
+            intent=result.intent,
         )
 
     if not _has_meaningful_text(text):
@@ -479,6 +480,7 @@ async def classify(
         fallback_used=False,
         model_name=llm_result.model_name,
         off_topic=bool(data.off_topic),
+        intent=data.intent,
     )
 
     # Кэш: только auto первого прохода основной модели.

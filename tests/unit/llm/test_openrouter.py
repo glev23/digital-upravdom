@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
 from typing import cast
@@ -214,21 +215,83 @@ async def test_secret_not_in_repr_or_exception() -> None:
 
 
 @pytest.mark.asyncio
-async def test_budget_at_most_two_timeouts() -> None:
-    calls: list[float] = []
+async def test_chain_tries_every_model_until_one_answers() -> None:
+    """Резервов несколько: перебор не останавливается на втором (LLM-002)."""
+
+    calls: list[str] = []
+
+    def route(request: httpx.Request) -> httpx.Response:
+        model = json.loads(request.content)["model"]
+        calls.append(model)
+        if model != "test/fb3:free":
+            return httpx.Response(503, json={"error": {"message": "down"}})
+        return httpx.Response(200, json=_ok_body(content='{"label":"third"}', model=model))
+
+    client = OpenRouterClient(
+        settings=_settings(openrouter_model_fallback="test/fb1:free, test/fb2:free, test/fb3:free"),
+        transport=httpx.MockTransport(route),
+    )
+    result = await client.complete_json(MESSAGES, schema=_Tiny)
+    assert cast(_Tiny, result.data).label == "third"
+    assert result.fallback_model_used is True
+    assert calls == ["test/primary:free", "test/fb1:free", "test/fb2:free", "test/fb3:free"]
+
+
+@pytest.mark.asyncio
+async def test_chain_skips_duplicates_of_primary() -> None:
+    """Та же модель в резерве — лишний вызов и лишние секунды ожидания."""
+
+    calls: list[str] = []
+
+    def route(request: httpx.Request) -> httpx.Response:
+        calls.append(json.loads(request.content)["model"])
+        return httpx.Response(503, json={"error": {"message": "down"}})
+
+    client = OpenRouterClient(
+        settings=_settings(openrouter_model_fallback="test/primary:free,test/fb1:free"),
+        transport=httpx.MockTransport(route),
+    )
+    with pytest.raises(LlmUnavailable):
+        await client.complete_json(MESSAGES, schema=_Tiny)
+    assert calls == ["test/primary:free", "test/fb1:free"]
+
+
+@pytest.mark.asyncio
+async def test_budget_stops_chain_before_inbound_window() -> None:
+    """Пять моделей по 45 с пережили бы окно видимости inbound (120 с).
+
+    Бюджет 100 с обрывает перебор: сообщение не должно вернуться в очередь
+    и обработаться второй раз, пока мы ещё опрашиваем резервы.
+    """
+
+    clock = {"t": 0.0}
+    calls: list[str] = []
+    budgets: list[float] = []
+
+    def now() -> float:
+        return clock["t"]
 
     def handler(request: httpx.Request) -> httpx.Response:
-        _ = request
-        calls.append(1.0)
+        calls.append(json.loads(request.content)["model"])
+        budgets.append(float(request.extensions["timeout"]["read"]))
+        clock["t"] += 45.0  # каждая модель молчит до конца таймаута
         raise httpx.ReadTimeout("slow")
 
     client = OpenRouterClient(
-        settings=_settings(),
+        settings=_settings(
+            openrouter_model_fallback="test/fb1:free,test/fb2:free,test/fb3:free,test/fb4:free",
+            llm_timeout_seconds=45.0,
+            llm_total_budget_seconds=100.0,
+        ),
         transport=httpx.MockTransport(handler),
+        time_fn=now,
     )
     with pytest.raises(LlmUnavailable):
-        await client.complete_json(MESSAGES, schema=_Tiny, timeout_s=8.0)
-    assert len(calls) == 2
+        await client.complete_json(MESSAGES, schema=_Tiny)
+    assert calls == ["test/primary:free", "test/fb1:free", "test/fb2:free"]
+    # Основной — полные 45 с, резерву — не больше 20 с, последней попытке —
+    # только остаток бюджета.
+    assert budgets == [45.0, 20.0, 10.0]
 
 
 @pytest.mark.asyncio
@@ -315,3 +378,70 @@ async def test_no_proxy_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     client = OpenRouterClient(settings=_settings())
     await client.complete_json(MESSAGES, schema=_Tiny)
     assert seen["proxy"] is None
+
+
+@pytest.mark.asyncio
+async def test_hanging_model_is_cut_by_wall_clock() -> None:
+    """Таймаут — общий срок вызова, а не пауза между порциями байт.
+
+    OpenRouter, пока ждёт провайдера, присылает в тело keepalive-комментарии,
+    и read-таймаут httpx отсчитывается заново на каждую порцию. На замере
+    LLM-002 вызов к зависшей бесплатной модели прожил 104 с при лимите 40 с —
+    столько в цепочке из пяти моделей стоить нельзя.
+    """
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        _ = request
+        await asyncio.sleep(5.0)
+        return httpx.Response(200, json=_ok_body(content='{"label":"late"}'))
+
+    client = OpenRouterClient(
+        settings=_settings(openrouter_model_fallback=None),
+        transport=httpx.MockTransport(slow),
+    )
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(LlmUnavailable, match="timeout"):
+        await client.complete_json(MESSAGES, schema=_Tiny, timeout_s=0.2)
+    assert asyncio.get_running_loop().time() - started < 2.0
+
+
+@pytest.mark.asyncio
+async def test_fallback_gets_short_timeout_and_budget_can_be_narrowed() -> None:
+    """Мёртвый резерв не должен висеть 45 с (прод, 29.09.2026: вопрос ждал 100 с).
+
+    Второй вызов (консультант) получает только остаток окна — бюджет задаёт
+    вызывающий.
+    """
+
+    clock = {"t": 0.0}
+    calls: list[tuple[str, float]] = []
+
+    def now() -> float:
+        return clock["t"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        read = float(request.extensions["timeout"]["read"])
+        calls.append((json.loads(request.content)["model"], read))
+        clock["t"] += read
+        raise httpx.ReadTimeout("slow")
+
+    client = OpenRouterClient(
+        settings=_settings(
+            openrouter_model_fallback="test/fb1:free,test/fb2:free,test/fb3:free",
+            llm_timeout_seconds=45.0,
+            llm_fallback_timeout_seconds=20.0,
+            llm_total_budget_seconds=100.0,
+        ),
+        transport=httpx.MockTransport(handler),
+        time_fn=now,
+    )
+    with pytest.raises(LlmUnavailable):
+        await client.complete_json(MESSAGES, schema=_Tiny, budget_s=30.0)
+    # Бюджет 30 с: основной — 30, на резерв остатка < 8 с уже нет.
+    assert calls == [("test/primary:free", 30.0)]
+
+    clock["t"] = 1000.0
+    calls.clear()
+    with pytest.raises(LlmUnavailable):
+        await client.complete_json(MESSAGES, schema=_Tiny)
+    assert [t for _, t in calls] == [45.0, 20.0, 20.0, 15.0]

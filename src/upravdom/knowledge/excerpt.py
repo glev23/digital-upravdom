@@ -1,8 +1,14 @@
-"""Вырезка из пункта нормы для ответа жителю.
+"""Короткая цитата пункта нормы для ответа жителю.
 
-Пункты длинные (ПП №491 п. 2 — ~2000 символов), а нужное жителю слово часто
-в середине: для лифта это «лифты» внутри подпункта «а». Первые N символов
-пункта показывали бы вводную часть, обрезанную посреди слова.
+Пункты длинные (ПП №491 п. 2 — ~2000 символов, ПП №416 п. 14 — одно
+предложение на ~950). Прежнее окно в 340–480 символов вокруг совпадения
+читалось как стена юридического текста и обрывалось с «…» с обеих сторон:
+живой прогон 28.09.2026 (заявки № 18–20) показал перечисление «б) крыши;
+в) ограждающие несущие конструкции…», не относящееся к проблеме жителя, и
+пересказ нормы, которая двумя строками выше уже написана по-человечески.
+
+Теперь в сообщении одна короткая мысль, а полный пункт житель открывает
+кнопкой «Показать норму» (UX-правка 29.09.2026).
 """
 
 from __future__ import annotations
@@ -13,17 +19,18 @@ _WORD = re.compile(r"[а-яёa-z0-9]+", re.IGNORECASE)
 # Совпадение по началу слова: «лифт» находит «лифты», «лифтовые».
 _STEM_LEN = 4
 _LEAD_MAX = 150
-# 200 символов обрывали пункт посреди фразы («…за оказание всех услуг и (или)
-# выполнение работ…»): обрывок читался как незаконченная мысль и на живом
-# прогоне противоречил ответу «отвечает УК». Окно шире и режется по границе
-# фразы, а не по произвольному слову.
-_LIMIT = 340
-# Граница фразы ищется в хвосте окна и чуть за его пределами: у длинного
-# пункта (ЖК РФ, ст. 161 ч. 2.3 — одно предложение на 1300 символов)
-# ближайшая запятая назад отрезала бы половину окна.
-_CLAUSE_TAIL = 0.55
-_CLAUSE_SLACK = 0.5
 _CLAUSE_NO = re.compile(r"^\d+(\.\d+)*\.\s*")
+_QUOTE_LIMIT = 180
+# Подпункт перечня: «а) помещения…; б) крыши; в) …».
+_LIST_ITEM = re.compile(r"(?:^|\s)[а-яё]\)\s", re.IGNORECASE)
+# Точка после этих слов — сокращение, а не граница фразы: «п. 5», «ст. 161».
+_ABBREV = frozenset(
+    "п пп ст ч чч абз подп пт гл разд прил г гг в вв руб тыс млн др см напр т е и".split()
+)
+# Обрыв на служебном слове читается как оборванная мысль: «…в течение не…».
+_DANGLING = frozenset(
+    "не и а но или в во с со на по для от до при из за над под о об у ни же бы что как".split()
+)
 
 
 def _norm(word: str) -> str:
@@ -55,65 +62,77 @@ def match_position(body: str, *queries: str) -> int | None:
     return None
 
 
-def _clause_end(text: str, start: int, end: int, *, limit: int) -> int:
-    """Конец окна по границе фразы: точка → точка с запятой → запятая → слово.
+def _is_boundary(text: str, i: int) -> bool:
+    """Граница фразы: запятая, точка с запятой или точка не внутри сокращения."""
 
-    Для каждого знака берётся ближайшая к желаемому концу граница — назад по
-    хвосту окна или вперёд в пределах допуска.
+    if text[i] in ";,":
+        return True
+    words = _WORD.findall(text[:i])
+    return not (words and (_norm(words[-1]) in _ABBREV or words[-1].isdigit()))
+
+
+def _drop_dangling(text: str) -> str:
+    words = text.split()
+    while words and _norm(words[-1].strip(".,;:()")) in _DANGLING:
+        words.pop()
+    return " ".join(words).strip(" ,;:")
+
+
+def _opening(text: str, limit: int) -> str:
+    """Начало пункта до границы фразы, «…» только в конце и только при обрыве."""
+
+    if len(text) <= limit:
+        return text
+    best = 0
+    for i, ch in enumerate(text[:limit]):
+        if ch in ".;," and _is_boundary(text, i):
+            best = i
+    if best == 0:
+        space = text.rfind(" ", 0, limit)
+        best = space if space > 0 else limit
+    head = _drop_dangling(text[:best].strip(" ,;:"))
+    return f"{head}…" if head else ""
+
+
+def _list_item(text: str, pos: int, limit: int) -> str | None:
+    """«Вводная: … подпункт», если совпадение попало в короткий подпункт перечня.
+
+    Для кровли это «В состав общего имущества включаются: … б) крыши» вместо
+    начала пункта про помещения вообще. Пропуск остальных подпунктов помечен
+    «…» — это не обрыв, а честно обозначенное сокращение цитаты.
     """
 
-    floor = start + int((end - start) * _CLAUSE_TAIL)
-    ceiling = min(len(text), end + int(limit * _CLAUSE_SLACK))
-    for mark in (".", ";", ","):
-        back = text.rfind(mark, floor, end)
-        forward = text.find(mark, end, ceiling)
-        best = back if back > start else None
-        if forward != -1 and (best is None or forward - end < end - best):
-            best = forward
-        if best is not None:
-            return best + 1
-    space = text.rfind(" ", start, end)
-    return space if space > start else end
+    colon = text.find(":")
+    if not 0 < colon < _LEAD_MAX or pos <= colon:
+        return None
+    starts = [m.start() for m in _LIST_ITEM.finditer(text, colon) if m.start() <= pos]
+    if not starts:
+        return None
+    end = text.find(";", pos)
+    item = text[starts[-1] : end if end != -1 else len(text)].strip(" ,;:.")
+    quote = f"{text[: colon + 1]} … {item}"
+    return quote if len(quote) <= limit else None
 
 
-def norm_excerpt(body: str, *queries: str, limit: int = _LIMIT) -> str:
-    """Окно пункта вокруг первого совпадения с запросами, по границе фразы.
+def norm_quote(body: str, *queries: str, limit: int = _QUOTE_LIMIT) -> str:
+    """Короткая цитата пункта для сообщения жителю.
 
-    Запросы идут по убыванию приоритета (название типа проблемы точнее слов
-    жалобы: «двери не открываются» у застрявшего лифта не должно уводить в
-    подпункт про двери подъезда). Без совпадения — начало пункта.
+    Совпадение в коротком подпункте перечня — «вводная: … подпункт». Иначе —
+    начало пункта: в нормативе там его предмет («В состав общего имущества
+    включаются внутридомовые инженерные системы холодного и горячего
+    водоснабжения…»), то есть ровно то, что объясняет зону ответственности.
+
+    Законченной фразы целиком не требуем: цитируемые пункты базы — одно
+    предложение на 500–950 символов, такое правило убрало бы цитату почти
+    отовсюду. Номер пункта не повторяется — он уже есть в подписи ссылки.
     """
 
-    text = " ".join(body.split())
+    text = _CLAUSE_NO.sub("", " ".join(body.split())).strip()
     if not text:
         return ""
     pos = match_position(text, *queries)
-
-    lead = ""
-    colon = text.find(":")
-    if 0 < colon < _LEAD_MAX:
-        lead = text[: colon + 1]
-    # Номер пункта («2.») уже есть в подписи ссылки — во вводной фразе он лишний.
-    lead_shown = _CLAUSE_NO.sub("", lead)
-
-    if pos is None or pos <= len(lead) + limit // 2:
-        start = 0
-    else:
-        start = max(len(lead), pos - limit // 3)
-        space = text.find(" ", start, pos + 1)
-        if space != -1:
-            start = space + 1
-
-    end = min(len(text), start + limit)
-    if end < len(text):
-        end = _clause_end(text, start, end, limit=limit)
-
-    window = text[start:end].strip(" ,;:")
-    if start == 0:
-        # Номер пункта уже есть в подписи ссылки: «ст. 161 ч. 2.3 — 2.3. При…».
-        window = _CLAUSE_NO.sub("", window)
-    head = ""
-    if start > 0:
-        head = f"{lead_shown} … " if lead_shown and start > len(lead) else "…"
-    tail = "…" if end < len(text) else ""
-    return f"{head}{window}{tail}"
+    if pos is not None:
+        item = _list_item(text, pos, limit)
+        if item:
+            return item
+    return _opening(text, limit)

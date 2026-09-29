@@ -17,10 +17,10 @@ from upravdom.bot_gateway import inbox
 from upravdom.bot_gateway.inbox import ClaimedEvent
 from upravdom.bot_gateway.schemas import parse_webhook_payload
 from upravdom.classifier.llm.fake import FakeLlmClient, timeout
-from upravdom.classifier.schema import LlmClassification
+from upravdom.classifier.schema import Intent, LlmClassification
 from upravdom.config import get_settings
 from upravdom.flow import texts
-from upravdom.flow.callbacks import encode_answer, encode_none, encode_status
+from upravdom.flow.callbacks import encode_answer, encode_none, encode_norm, encode_status
 from upravdom.flow.handlers import on_callback, on_message
 from upravdom.knowledge.retrieval import RetrievedChunk
 from upravdom.models import ClassificationLog, House, Ticket
@@ -143,6 +143,7 @@ def _llm(
     clarifying_question: str | None = None,
     clarifying_options: list[str] | None = None,
     off_topic: bool = False,
+    intent: Intent = Intent.COMPLAINT,
 ) -> LlmClassification:
     return LlmClassification(
         problem_type=problem_type,
@@ -150,6 +151,7 @@ def _llm(
         confidence=confidence,
         cited_fragments=cited_fragments or [1],
         off_topic=off_topic,
+        intent=intent,
         reasoning="тест",
         clarifying_question=clarifying_question,
         clarifying_options=clarifying_options or [],
@@ -710,3 +712,294 @@ async def test_house_tickets_list_hides_internal_type_name(
     ]
     assert texts.HOUSE_TICKETS_OTHER in listing
     assert "не удалось классифицировать" not in listing
+
+
+async def test_intent_routes_house_question_instead_of_ticket(
+    session: AsyncSession,
+    onboarded: tuple[str, uuid.UUID],
+    patch_search: None,
+) -> None:
+    """Формулировку, которую не поймал шаблон, разбирает модель (FLOW-005).
+
+    Живой прогон 28.09.2026: «какие заявки ещё есть в доме» уходило в
+    классификацию и создавало заявку диспетчеру.
+    """
+
+    user, _house = onboarded
+    llm = FakeLlmClient(
+        responses=[_llm(problem_type="other", confidence=0.2, intent=Intent.HOUSE_TICKETS)]
+    )
+    await _deliver(session, _message(user, "какие заявки ещё есть в доме"), _handler(llm))
+
+    out = await _outbox_texts(session, user)
+    assert any(texts.HOUSE_TICKETS_EMPTY in t or texts.HOUSE_TICKETS_PRIVACY in t for t in out)
+    assert (await session.scalar(select(func.count()).select_from(Ticket))) == 0
+
+
+async def test_intent_routes_my_tickets_question(
+    session: AsyncSession,
+    onboarded: tuple[str, uuid.UUID],
+    patch_search: None,
+) -> None:
+    user, _house = onboarded
+    llm = FakeLlmClient(
+        responses=[_llm(problem_type="other", confidence=0.2, intent=Intent.MY_TICKETS)]
+    )
+    await _deliver(session, _message(user, "а что там с моими обращениями"), _handler(llm))
+
+    out = await _outbox_texts(session, user)
+    assert any(texts.STATUS_EMPTY in t or texts.STATUS_LIST_HEADER in t for t in out)
+    assert (await session.scalar(select(func.count()).select_from(Ticket))) == 0
+
+
+async def test_intent_does_not_swallow_a_complaint(
+    session: AsyncSession,
+    onboarded: tuple[str, uuid.UUID],
+    patch_search: None,
+) -> None:
+    """Жалоба с вопросом внутри остаётся жалобой: тип определён — значит заявка."""
+
+    user, _house = onboarded
+    llm = FakeLlmClient(responses=[_llm(problem_type="cold_water", intent=Intent.HOUSE_TICKETS)])
+    await _deliver(
+        session, _message(user, "какие заявки в доме, у меня опять течёт"), _handler(llm)
+    )
+    assert (await session.scalar(select(func.count()).select_from(Ticket))) == 1
+
+
+async def test_intent_rights_does_not_create_ticket(
+    session: AsyncSession,
+    onboarded: tuple[str, uuid.UUID],
+    patch_search: None,
+) -> None:
+    """Вопрос о правах без команды и без «?» уходит в справку, а не в заявку."""
+
+    user, _house = onboarded
+    # Второй ответ в очереди не задан: справка честно откажет, но заявки не будет.
+    llm = FakeLlmClient(
+        responses=[_llm(problem_type="other", confidence=0.2, intent=Intent.RIGHTS)]
+    )
+    await _deliver(
+        session, _message(user, "а вообще за сколько чинят такое по нормативу"), _handler(llm)
+    )
+    assert (await session.scalar(select(func.count()).select_from(Ticket))) == 0
+
+
+async def _buttons_of_last(session: AsyncSession, chat: str) -> list[str]:
+    row = await session.execute(
+        text(
+            "SELECT payload FROM outbound_messages WHERE max_chat_id = :c "
+            "AND NOT (payload::jsonb ? 'callback_id') ORDER BY created_at DESC, id DESC LIMIT 1"
+        ),
+        {"c": chat},
+    )
+    payload = row.scalar_one()
+    out: list[str] = []
+    for att in payload.get("attachments") or []:
+        for btn_row in att["payload"]["buttons"]:
+            out.extend(btn["text"] for btn in btn_row)
+    return out
+
+
+async def _kb_chunk(
+    session: AsyncSession, chunk_text: str, *, company_id: uuid.UUID | None = None
+) -> uuid.UUID:
+    from datetime import date
+
+    from upravdom.models import KnowledgeChunk, KnowledgeDocument
+
+    doc = KnowledgeDocument(
+        source_key=f"test-{uuid.uuid4().hex[:6]}",
+        title="тест",
+        version="1",
+        effective_from=date(2020, 1, 1),
+        management_company_id=company_id,
+        checksum="x",
+    )
+    session.add(doc)
+    await session.flush()
+    chunk = KnowledgeChunk(document_id=doc.id, chunk_text=chunk_text)
+    session.add(chunk)
+    await session.flush()
+    return chunk.id
+
+
+async def test_ticket_reply_is_short_and_offers_full_norm(
+    session: AsyncSession,
+    onboarded: tuple[str, uuid.UUID],
+    patch_search: None,
+) -> None:
+    """UX 29.09.2026: основание — короткая цитата, полный пункт по кнопке."""
+
+    user, _house = onboarded
+    llm = FakeLlmClient(responses=[_llm()])
+    await _deliver(session, _message(user, "из стены за ванной сифонит"), _handler(llm))
+    reply = next(t for t in await _outbox_texts(session, user) if "принята" in t)
+    basis = next(line for line in reply.splitlines() if line.startswith("Основание:"))
+    assert len(basis) < 260
+    assert texts.BTN_NORM in await _buttons_of_last(session, user)
+    assert texts.BTN_STATUS in await _buttons_of_last(session, user)
+
+
+async def test_norm_button_sends_full_clause(
+    session: AsyncSession, onboarded: tuple[str, uuid.UUID]
+) -> None:
+    user, _house = onboarded
+    tail = "окончание пункта, которое в сообщение о заявке не помещается"
+    body = "В состав общего имущества включаются внутридомовые системы, " * 20 + tail
+    chunk_id = await _kb_chunk(session, f"ПП РФ №491, п. 5 абз. 1\n{body}")
+    await session.commit()
+
+    await _deliver(session, _callback(user, encode_norm(chunk_id)), on_callback)
+    out = await _outbox_texts(session, user)
+    assert out[-1].startswith("ПП РФ №491, п. 5 абз. 1\n\n")
+    assert out[-1].endswith(tail)
+
+
+async def test_norm_button_hides_other_company_document(
+    session: AsyncSession, onboarded: tuple[str, uuid.UUID]
+) -> None:
+    """Документ УК виден только её жителям — и в поиске, и по подобранному id."""
+
+    user, house_id = onboarded
+    own = await session.scalar(select(House.management_company_id).where(House.id == house_id))
+    other = stable_id("mc:uk-privolzhskaya")
+    if other == own:
+        other = stable_id("mc:uk-vahitovskaya")
+    secret = "секретный пункт договора чужой УК"
+    chunk_id = await _kb_chunk(session, f"Договор управления, п. 4.2\n{secret}", company_id=other)
+    await session.commit()
+
+    await _deliver(session, _callback(user, encode_norm(chunk_id)), on_callback)
+    out = await _outbox_texts(session, user)
+    assert out[-1] == texts.NORM_NOT_FOUND
+    assert not any(secret in t for t in out)
+
+
+async def test_norm_button_own_company_document_is_shown(
+    session: AsyncSession, onboarded: tuple[str, uuid.UUID]
+) -> None:
+    user, house_id = onboarded
+    own = await session.scalar(select(House.management_company_id).where(House.id == house_id))
+    assert own is not None
+    chunk_id = await _kb_chunk(
+        session, "Договор управления, п. 4.2\nмастер — два часа", company_id=own
+    )
+    await session.commit()
+
+    await _deliver(session, _callback(user, encode_norm(chunk_id)), on_callback)
+    assert (await _outbox_texts(session, user))[-1].endswith("мастер — два часа")
+
+
+async def test_norm_button_unknown_chunk(
+    session: AsyncSession, onboarded: tuple[str, uuid.UUID]
+) -> None:
+    user, _house = onboarded
+    await _deliver(session, _callback(user, encode_norm(uuid.uuid4())), on_callback)
+    assert (await _outbox_texts(session, user))[-1] == texts.NORM_NOT_FOUND
+
+
+async def test_intent_consult_answers_without_ticket(
+    session: AsyncSession,
+    onboarded: tuple[str, uuid.UUID],
+    patch_search: None,
+) -> None:
+    """Шум в подъезде — совет, а не заявка УК (консультант, 29.09.2026)."""
+
+    from upravdom.consult import texts as consult_texts
+    from upravdom.consult.schema import LlmConsultAnswer
+
+    user, _house = onboarded
+    llm = FakeLlmClient(
+        responses=[
+            _llm(problem_type="other", zone=ResponsibilityZone.UNKNOWN, intent=Intent.CONSULT),
+            LlmConsultAnswer(answer="Шумом по ночам занимается участковый."),
+        ]
+    )
+    await _deliver(session, _message(user, "в подъезде орут по ночам"), _handler(llm))
+    assert (await session.scalar(select(func.count()).select_from(Ticket))) == 0
+    out = await _outbox_texts(session, user)
+    assert "участковый" in out[-1]
+    assert consult_texts.FOOTER in out[-1]
+
+
+async def test_consult_needing_repair_becomes_ticket(
+    session: AsyncSession,
+    onboarded: tuple[str, uuid.UUID],
+    patch_search: None,
+) -> None:
+    """Консультант увидел работу для УК — заявка, а не совет «подайте сами»."""
+
+    from upravdom.consult.schema import LlmConsultAnswer
+
+    user, _house = onboarded
+    llm = FakeLlmClient(
+        responses=[
+            _llm(problem_type="other", zone=ResponsibilityZone.UNKNOWN, intent=Intent.CONSULT),
+            LlmConsultAnswer(needs_ticket=True),
+        ]
+    )
+    await _deliver(session, _message(user, "кот нагадил в подъезде"), _handler(llm))
+    assert (await session.scalar(select(func.count()).select_from(Ticket))) == 1
+
+
+async def test_consult_unavailable_keeps_ticket(
+    session: AsyncSession,
+    onboarded: tuple[str, uuid.UUID],
+    patch_search: None,
+) -> None:
+    """Второй вызов модели упал — обращение не теряется: заявка, как раньше."""
+
+    user, _house = onboarded
+    llm = FakeLlmClient(
+        responses=[
+            _llm(problem_type="other", zone=ResponsibilityZone.UNKNOWN, intent=Intent.CONSULT),
+            timeout(),
+        ]
+    )
+    await _deliver(session, _message(user, "в подъезде орут по ночам"), _handler(llm))
+    assert (await session.scalar(select(func.count()).select_from(Ticket))) == 1
+
+
+async def test_consult_with_concrete_type_stays_complaint(
+    session: AsyncSession,
+    onboarded: tuple[str, uuid.UUID],
+    patch_search: None,
+) -> None:
+    """Несимметричное условие, как у FLOW-003/005: тип найден — значит заявка."""
+
+    user, _house = onboarded
+    llm = FakeLlmClient(responses=[_llm(problem_type="common_area", intent=Intent.CONSULT)])
+    await _deliver(session, _message(user, "в подъезде темно и какие-то люди орут"), _handler(llm))
+    assert (await session.scalar(select(func.count()).select_from(Ticket))) == 1
+
+
+async def test_consult_skipped_when_window_is_spent(
+    session: AsyncSession,
+    onboarded: tuple[str, uuid.UUID],
+    patch_search: None,
+) -> None:
+    """Классификация съела окно видимости — консультанта не зовём, сразу заявка.
+
+    Прод, 29.09.2026: классификация на висящих резервах заняла 100 с из 120, и
+    второй вызов с полным бюджетом пережил бы окно — сообщение обработалось бы
+    повторно. Здесь окно ужато так, что времени на консультанта нет с начала.
+    """
+
+    from upravdom.consult.schema import LlmConsultAnswer
+
+    user, _house = onboarded
+    llm = FakeLlmClient(
+        responses=[
+            _llm(problem_type="other", zone=ResponsibilityZone.UNKNOWN, intent=Intent.CONSULT),
+            LlmConsultAnswer(answer="не должно понадобиться"),
+        ]
+    )
+    narrow = get_settings().model_copy(update={"inbound_visibility_timeout_seconds": 30})
+
+    async def handle(session: AsyncSession, event: ClaimedEvent) -> None:
+        await on_message(session, event, llm=llm, settings=narrow)
+
+    await _deliver(session, _message(user, "в подъезде орут по ночам"), gated(handle))
+    assert (await session.scalar(select(func.count()).select_from(Ticket))) == 1
+    assert len(llm.calls) == 1  # только классификация

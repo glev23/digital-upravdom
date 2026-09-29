@@ -57,6 +57,7 @@ class LlmClient(Protocol):
         *,
         schema: type[BaseModel],
         timeout_s: float | None = None,
+        budget_s: float | None = None,
     ) -> LlmResult: ...
 
 

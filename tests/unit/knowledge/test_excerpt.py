@@ -1,8 +1,8 @@
-"""Вырезка пункта нормы для ответа жителю."""
+"""Короткая цитата пункта нормы для ответа жителю."""
 
 from __future__ import annotations
 
-from upravdom.knowledge.excerpt import match_position, norm_excerpt
+from upravdom.knowledge.excerpt import match_position, norm_quote
 
 # Дословное начало ПП РФ №491 п. 2 (как в data/kb/sources/pp491.md).
 PP491_P2 = (
@@ -19,58 +19,63 @@ PP491_P2 = (
     "жилого и (или) нежилого помещения (включая окна и двери помещений общего пользования, "
     "перила, парапеты и иные ограждающие ненесущие конструкции);"
 )
+# Дословное начало ПП РФ №416 п. 14 — одно предложение на ~950 символов.
+PP416_P14 = (
+    "14. При поступлении сигналов об аварии или повреждении внутридомовых инженерных систем "
+    "холодного и горячего водоснабжения, водоотведения и внутридомовых систем отопления и "
+    "электроснабжения, информационно-телекоммуникационных сетей, систем газоснабжения и "
+    "внутридомового газового оборудования, входящих в состав общего имущества собственников "
+    "помещений в многоквартирном доме, аварийно-диспетчерская служба обеспечивает"
+)
 
 
-def test_lift_complaint_shows_lift_clause_with_lead() -> None:
-    out = norm_excerpt(PP491_P2, "Лифт", "лифт застрял между этажами, двери не открываются")
-    assert "лифты" in out
-    assert out.startswith("В состав общего имущества включаются: … ")
-    assert not out.startswith("2.")
+def test_short_list_item_is_quoted_with_lead() -> None:
+    """Кровля — ровно подпункт «б) крыши», а не перечень помещений вообще.
+
+    Живой прогон 28.09.2026 (заявка № 20): окно в 340 символов показало
+    «б) крыши; в) ограждающие несущие конструкции…» с обрывом с обеих сторон.
+    """
+
+    out = norm_quote(PP491_P2, "Кровля крыша", "с потолка капает, крыша течёт")
+    assert out == "В состав общего имущества включаются: … б) крыши"
 
 
-def test_type_title_outranks_complaint_words() -> None:
-    # «двери» из жалобы встречаются в подпункте «г», но тип проблемы — лифт.
-    out = norm_excerpt(PP491_P2, "Лифт", "двери лифта не открываются")
-    assert "лифты" in out
-    assert "окна и двери" not in out
-
-
-def test_cut_on_word_boundary_and_ellipsis_only_when_cut() -> None:
-    out = norm_excerpt(PP491_P2, "Лифт", "лифт", limit=120)
+def test_long_item_falls_back_to_clause_opening() -> None:
+    # Подпункт «а» с лифтами длиннее лимита — показываем предмет пункта.
+    out = norm_quote(PP491_P2, "Лифт", "лифт застрял между этажами")
+    assert out.startswith("В состав общего имущества включаются: а) помещения")
     assert out.endswith("…")
-    body = out.removesuffix("…").split(" … ", 1)[-1]
-    words = PP491_P2.replace("\n", " ").split()
-    assert body.split()[-1].rstrip(",;:") in {w.rstrip(",;:") for w in words}
+    assert len(out) <= 180
 
-    short = "5. Коротко о главном."
+
+def test_single_long_sentence_is_cut_at_phrase_boundary() -> None:
+    """Никакого «…» в начале, обрыв только по границе фразы."""
+
+    out = norm_quote(PP416_P14, "Холодная вода", "нет холодной воды")
+    assert out.startswith("При поступлении сигналов об аварии")
+    assert not out.startswith("…")
+    assert out.endswith("…")
+    assert out.removesuffix("…").rstrip()[-1].isalpha()
+    assert len(out) <= 180
+
+
+def test_no_dangling_function_word_before_ellipsis() -> None:
+    text = "Служба обеспечивает ответ на звонок в течение не более 5 минут " * 6
+    out = norm_quote(text, limit=60)
+    last = out.removesuffix("…").split()[-1]
+    assert last.lower() not in {"не", "в", "на", "и"}
+
+
+def test_abbreviation_dot_is_not_a_phrase_end() -> None:
+    # Точка в «п. 5» и «2.4» — не граница: иначе цитата обрывалась на «СНиП 2.…».
+    text = "Требования по п. 5 и СНиП 2.4 распространяются на внутридомовые сети " * 5
+    out = norm_quote(text, limit=40)
+    assert not out.removesuffix("…").endswith(("п", "2"))
+
+
+def test_short_clause_shown_whole_without_number() -> None:
     # Номер пункта не дублируется: он уже есть в подписи ссылки.
-    assert norm_excerpt(short, "главное") == "Коротко о главном."
-
-
-def test_cut_on_clause_boundary_not_mid_phrase() -> None:
-    # Дословное начало ЖК РФ, ст. 161 ч. 2.3 — одно предложение без точек внутри:
-    # на живом прогоне окно 200 символов обрывало его на «выполнение работ…», и
-    # обрывок читался как противоречие ответу «отвечает УК».
-    zhk = (
-        "2.3. При управлении многоквартирным домом управляющей организацией она несет "
-        "ответственность перед собственниками помещений в многоквартирном доме за оказание "
-        "всех услуг и (или) выполнение работ, которые обеспечивают надлежащее содержание "
-        "общего имущества в данном доме и качество которых должно соответствовать требованиям "
-        "технических регламентов и установленных Правительством Российской Федерации правил "
-        "содержания общего имущества в многоквартирном доме, за предоставление коммунальных "
-        "услуг в зависимости от уровня благоустройства данного дома."
-    )
-    out = norm_excerpt(zhk, "Протечка кровли", "потолок протек и меня затопило")
-    assert not out.startswith("2.3.")
-    assert out.endswith("…")
-    assert "выполнение работ, которые обеспечивают надлежащее содержание" in out
-    assert out.removesuffix("…").endswith("в многоквартирном доме")
-
-
-def test_no_match_falls_back_to_start() -> None:
-    out = norm_excerpt(PP491_P2, "Газ", "газ не зажигается", limit=80)
-    assert out.startswith("В состав общего имущества")
-    assert out.endswith("…")
+    assert norm_quote("5. Коротко о главном.", "главное") == "Коротко о главном."
 
 
 def test_match_position_priority_and_yo() -> None:
@@ -83,4 +88,4 @@ def test_match_position_priority_and_yo() -> None:
 
 
 def test_empty_body() -> None:
-    assert norm_excerpt("", "лифт") == ""
+    assert norm_quote("", "лифт") == ""

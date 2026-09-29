@@ -65,7 +65,7 @@ def test_basis_prefers_norm_from_problem_types() -> None:
     основанием — ст. 161 ч. 2.3 про ответственность перед собственниками.
     """
 
-    line = _basis_line(
+    line, chunk_id = _basis_line(
         _result([ZHK_161_2_3, PP491_P2]),
         ROOF_NORM,
         type_title="Протечка кровли",
@@ -73,19 +73,38 @@ def test_basis_prefers_norm_from_problem_types() -> None:
     )
     assert line.startswith("Основание: ПП РФ №491, п. 2 — ")
     assert "крыши" in line
+    # id пункта — для кнопки «Показать норму» с полным текстом.
+    assert chunk_id == PP491_P2.chunk_id
 
 
 def test_basis_falls_back_to_confirmed_citation() -> None:
-    line = _basis_line(
+    line, chunk_id = _basis_line(
         _result([ZHK_161_2_3]),
         ROOF_NORM,
         type_title="Протечка кровли",
         raw_text="потолок протек",
     )
     assert line.startswith("Основание: ЖК РФ, ст. 161 ч. 2.3 — ")
+    assert chunk_id == ZHK_161_2_3.chunk_id
+
+
+def test_basis_quote_is_short() -> None:
+    """Живой прогон 28.09.2026: строка основания занимала 300–450 символов."""
+
+    line, _ = _basis_line(
+        _result([ZHK_161_2_3]),
+        ROOF_NORM,
+        type_title="Протечка кровли",
+        raw_text="потолок протек",
+    )
+    quote = line.split(" — ", 1)[1]
+    assert len(quote) <= 180
+    assert not quote.startswith("…")
 
 
 def test_basis_without_citations_shows_bare_norm() -> None:
+    # Без подтверждённого фрагмента кнопки нет: показывать по ней нечего.
     assert _basis_line(_result([]), ROOF_NORM, type_title="Протечка кровли", raw_text="течёт") == (
-        "Основание: ПП РФ №491, п.2"
+        "Основание: ПП РФ №491, п.2",
+        None,
     )
